@@ -29,7 +29,11 @@ from openhdo_linker import (  # noqa: E402
     TuyaLocalDriver,
 )
 from openhdo_linker.cli import _inspection_payload, _parser, _resolve_inspect_local_key  # noqa: E402
-from openhdo_linker.boundary import DISCOVERY_MIN_SCAN_S, DISCOVERY_PROTOCOL_MARGIN_S  # noqa: E402
+from openhdo_linker.boundary import (  # noqa: E402
+    DISCOVERY_DRIVER_RETURN_MARGIN_S,
+    DISCOVERY_MIN_SCAN_S,
+    DISCOVERY_PROTOCOL_MARGIN_S,
+)
 from openhdo_linker.server_client import LinkerServerClient  # noqa: E402
 from openhdo_linker.tuya import (  # noqa: E402
     COMMAND_REQUEST_DEVICE_INFO,
@@ -81,6 +85,13 @@ class DiscoveryDriver:
 class BlockingDiscoveryDriver(DiscoveryDriver):
     async def discover(self, config, credentials):
         await asyncio.Event().wait()
+        return ()
+
+
+class ReturnAfterEffectiveTimeoutDriver(DiscoveryDriver):
+    async def discover(self, config, credentials):
+        self.config = config
+        await asyncio.sleep(config.timeout_s)
         return ()
 
 
@@ -326,14 +337,31 @@ class DiscoveryEnvelopeTests(unittest.TestCase):
 
         asyncio.run(check())
 
-    def test_discovery_timeout_floor_keeps_one_second_scan_and_completion(self) -> None:
+    def test_discovery_timeout_floor_keeps_nonzero_scan_and_completion(self) -> None:
         async def check() -> None:
             driver = DiscoveryDriver()
             boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
             messages = await boundary.handle_discovery(self._request(timeout_s=1))
-            self.assertEqual(driver.config.timeout_s, DISCOVERY_MIN_SCAN_S)
+            self.assertEqual(driver.config.timeout_s, 1.0 - DISCOVERY_PROTOCOL_MARGIN_S)
+            self.assertLess(driver.config.timeout_s, 1.0)
+            self.assertGreaterEqual(driver.config.timeout_s, DISCOVERY_MIN_SCAN_S)
             self.assertEqual(messages[-1].type, "discovery.completed")
             self.assertEqual(messages[-1].payload["status"], "completed")
+
+        asyncio.run(check())
+
+    def test_discovery_driver_return_margin_keeps_completion_completed(self) -> None:
+        async def check() -> None:
+            driver = ReturnAfterEffectiveTimeoutDriver()
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
+            messages = await boundary.handle_discovery(self._request(timeout_s=1))
+            self.assertEqual(driver.config.timeout_s, 1.0 - DISCOVERY_PROTOCOL_MARGIN_S)
+            self.assertEqual(
+                messages[-1].type,
+                "discovery.completed",
+            )
+            self.assertEqual(messages[-1].payload["status"], "completed")
+            self.assertLess(driver.config.timeout_s + DISCOVERY_DRIVER_RETURN_MARGIN_S, 1.0)
 
         asyncio.run(check())
 

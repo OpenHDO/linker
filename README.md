@@ -146,10 +146,14 @@ start a session with `POST /api/v1/discovery/sessions` and body
 `discovery.candidate` and `discovery.completed` envelopes to that request.
 Timeout, cancellation, disconnect, and scan errors are terminal session
 failures; the Linker never reports secret or device-network details in them.
-The Linker reserves `DISCOVERY_PROTOCOL_MARGIN_S = 0.25` seconds for outbound
-candidate/completion envelopes: the driver receives
-`max(1.0, timeout_s - 0.25)`, preserving at least one second of effective LAN
-scan time while avoiding a completion race with the server deadline.
+The Linker reserves `DISCOVERY_PROTOCOL_MARGIN_S = 0.25` seconds from the
+requested budget and gives the outer wait an additional bounded
+`DISCOVERY_DRIVER_RETURN_MARGIN_S = 0.10` seconds for `to_thread` return and
+cleanup. The driver receives `max(0.5, timeout_s - 0.25)` and the outer wait is
+that value plus `0.10`; for every valid `timeout_s` from 1 through 60, the
+outer wait remains strictly below the server budget. At the 1-second lower
+bound this means a 0.75-second LAN scan and a 0.85-second outer wait, never a
+zero-length scan.
 
 ## Run the Linker process
 

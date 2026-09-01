@@ -14,7 +14,8 @@ from .models import DeviceDescriptor, DiscoveryCandidate, LightState, Rgb
 from .protocol import Envelope
 
 DISCOVERY_PROTOCOL_MARGIN_S = 0.25
-DISCOVERY_MIN_SCAN_S = 1.0
+DISCOVERY_DRIVER_RETURN_MARGIN_S = 0.10
+DISCOVERY_MIN_SCAN_S = 0.5
 
 
 class CommandJournal(Protocol):
@@ -92,7 +93,8 @@ class LinkerBoundary:
         discovery_config = replace(self.config.discovery, timeout_s=effective_timeout_s)
         try:
             descriptors = await asyncio.wait_for(
-                self.driver.discover(discovery_config, self.credentials), timeout=effective_timeout_s
+                self.driver.discover(discovery_config, self.credentials),
+                timeout=effective_timeout_s + DISCOVERY_DRIVER_RETURN_MARGIN_S,
             )
             candidates = tuple(DiscoveryCandidate.from_descriptor(descriptor) for descriptor in descriptors)
         except asyncio.CancelledError:

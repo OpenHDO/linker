@@ -53,10 +53,14 @@ Tuya local discovery protocol. It is deliberately separate from EZ/AP Wi-Fi
 provisioning, pairing, cloud onboarding, and local-key recovery; none of those
 flows are implemented or implied by `discovery.start`.
 
-The boundary reserves `DISCOVERY_PROTOCOL_MARGIN_S = 0.25` seconds for
-outbound discovery envelopes. The concrete driver receives
-`max(1.0, timeout_s - 0.25)`, so a valid request always retains at least one
-second of effective LAN scan time while completion has protocol headroom.
+The boundary reserves `DISCOVERY_PROTOCOL_MARGIN_S = 0.25` seconds from the
+requested budget and adds a bounded
+`DISCOVERY_DRIVER_RETURN_MARGIN_S = 0.10` seconds to the outer wait for
+`to_thread` return and cleanup. The concrete driver receives
+`max(0.5, timeout_s - 0.25)` and the outer wait is that value plus `0.10`.
+Thus every valid 1..60-second request has an outer wait strictly below the
+server budget; at the 1-second lower bound the effective LAN scan is 0.75
+seconds and the outer wait is 0.85 seconds, not zero.
 
 ## Consequences
 
