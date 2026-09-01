@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.request import urlopen
@@ -16,13 +18,56 @@ from openhdo_linker import DeviceDescriptor, Envelope, LightState, Rgb  # noqa: 
 
 
 CONTRACT_ROOT = "https://raw.githubusercontent.com/OpenHDO/server/master/contracts/v1/"
+CONTRACT_FILES = (
+    "envelope.schema.json",
+    "link-manifest.schema.json",
+    "light-capability.schema.json",
+    "light-command.schema.json",
+    "light.schema.json",
+    "light-state.schema.json",
+)
+REMOTE_TIMEOUT_SECONDS = 5
+
+
+def _contract_candidates(environ: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+    values = os.environ if environ is None else environ
+    candidates: list[Path] = []
+    explicit = values.get("OPENHDO_SERVER_CONTRACT_DIR")
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    candidates.append(Path(__file__).resolve().parents[2] / "server" / "contracts" / "v1")
+    return tuple(candidates)
+
+
+def _local_contract_dir(environ: Mapping[str, str] | None = None) -> Path | None:
+    for directory in _contract_candidates(environ):
+        if directory.is_dir() and all((directory / name).is_file() for name in CONTRACT_FILES):
+            return directory
+    return None
 
 
 def contract(name: str) -> dict[str, object]:
-    with urlopen(CONTRACT_ROOT + name, timeout=10) as response:
-        value = json.load(response)
+    local_dir = _local_contract_dir()
+    if local_dir is not None:
+        source = local_dir / name
+        try:
+            with source.open(encoding="utf-8") as response:
+                value = json.load(response)
+        except (OSError, json.JSONDecodeError) as error:
+            raise AssertionError(f"could not load local server contract {source}: {error}") from error
+    else:
+        source = CONTRACT_ROOT + name
+        checked = ", ".join(str(path) for path in _contract_candidates())
+        try:
+            with urlopen(source, timeout=REMOTE_TIMEOUT_SECONDS) as response:
+                value = json.load(response)
+        except (OSError, json.JSONDecodeError) as error:
+            raise AssertionError(
+                f"could not load server contract {name}: checked local paths [{checked}], "
+                f"then remote fallback {source} with timeout {REMOTE_TIMEOUT_SECONDS}s: {error}"
+            ) from error
     if not isinstance(value, dict):
-        raise AssertionError(f"server contract {name} must be an object")
+        raise AssertionError(f"server contract {name} from {source} must be an object")
     return value
 
 
