@@ -25,11 +25,13 @@ class RuntimeConfigError(ValueError):
 class RuntimeConfig:
     server_url: str
     linker: LinkerConfig
-    device: TuyaDeviceConfig = field(repr=False)
-    light_id: str
+    device: TuyaDeviceConfig | None = field(default=None, repr=False)
+    light_id: str | None = None
     state_poll_interval_s: float = 15.0
     server_open_timeout_s: float = 10.0
     server_api_token: str | None = field(default=None, repr=False)
+    discovery_only: bool = False
+    discovery_enabled: bool = False
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.server_url)
@@ -39,8 +41,16 @@ class RuntimeConfig:
             raise RuntimeConfigError("server_api_token must not be empty")
         if not _is_local_host(parsed.hostname) and (parsed.scheme != "wss" or self.server_api_token is None):
             raise RuntimeConfigError("non-local servers require wss:// and OPENHDO_SERVER_TOKEN")
-        if not _LIGHT_ID.fullmatch(self.light_id):
-            raise RuntimeConfigError("light_id must be a lowercase OpenHDO identifier")
+        if self.discovery_only:
+            if self.device is not None or self.light_id is not None:
+                raise RuntimeConfigError("discovery-only mode cannot include real-device configuration")
+        else:
+            if self.device is None:
+                raise RuntimeConfigError("real device configuration is required outside discovery-only mode")
+            if self.light_id is None or not _LIGHT_ID.fullmatch(self.light_id):
+                raise RuntimeConfigError("light_id must be a lowercase OpenHDO identifier")
+        if type(self.discovery_enabled) is not bool:
+            raise RuntimeConfigError("discovery_enabled must be boolean")
         if self.state_poll_interval_s <= 0 or self.server_open_timeout_s <= 0:
             raise RuntimeConfigError("runtime timeouts must be positive")
 
@@ -64,6 +74,33 @@ class RuntimeConfig:
         linker_id = _string(env, "OPENHDO_LINKER_ID", linker_raw, "id", default="openhdo.linker.rgb")
         linker_version = _string(env, "OPENHDO_LINKER_VERSION", linker_raw, "version", default="0.3.0")
         linker_name = _string(env, "OPENHDO_LINKER_NAME", linker_raw, "name", default="OpenHDO Tuya LED Linker")
+        discovery_only = _boolean(env, "OPENHDO_DISCOVERY_ONLY", raw, "discovery_only", default=False)
+        discovery_enabled = _boolean(
+            env,
+            "OPENHDO_TUYA_DISCOVERY_ENABLED",
+            tuya_raw,
+            "discovery_enabled",
+            default=discovery_only,
+        )
+        linker = LinkerConfig(
+            id=linker_id,
+            version=linker_version,
+            name=linker_name,
+            transport="wifi",
+            discovery=DiscoveryConfig(),
+            reconnect_initial_s=float(_value(env, "OPENHDO_RECONNECT_INITIAL", linker_raw, "reconnect_initial_s", default=1.0)),
+            reconnect_max_s=float(_value(env, "OPENHDO_RECONNECT_MAX", linker_raw, "reconnect_max_s", default=30.0)),
+        )
+        if discovery_only:
+            return cls(
+                server_url=server,
+                linker=linker,
+                discovery_only=True,
+                discovery_enabled=discovery_enabled,
+                state_poll_interval_s=float(_value(env, "OPENHDO_STATE_POLL_INTERVAL", raw, "state_poll_interval_s", default=15.0)),
+                server_open_timeout_s=float(_value(env, "OPENHDO_SERVER_OPEN_TIMEOUT", raw, "server_open_timeout_s", default=10.0)),
+                server_api_token=server_api_token,
+            )
         light_id = _string(env, "OPENHDO_LIGHT_ID", tuya_raw, "light_id", default=None)
         device_id = _string(env, "OPENHDO_TUYA_DEVICE_ID", tuya_raw, "device_id", required=True)
         if light_id is None:
@@ -104,17 +141,10 @@ class RuntimeConfig:
         )
         return cls(
             server_url=server,
-            linker=LinkerConfig(
-                id=linker_id,
-                version=linker_version,
-                name=linker_name,
-                transport="wifi",
-                discovery=DiscoveryConfig(),
-                reconnect_initial_s=float(_value(env, "OPENHDO_RECONNECT_INITIAL", linker_raw, "reconnect_initial_s", default=1.0)),
-                reconnect_max_s=float(_value(env, "OPENHDO_RECONNECT_MAX", linker_raw, "reconnect_max_s", default=30.0)),
-            ),
+            linker=linker,
             device=device,
             light_id=light_id,
+            discovery_enabled=discovery_enabled,
             state_poll_interval_s=float(_value(env, "OPENHDO_STATE_POLL_INTERVAL", raw, "state_poll_interval_s", default=15.0)),
             server_open_timeout_s=float(_value(env, "OPENHDO_SERVER_OPEN_TIMEOUT", raw, "server_open_timeout_s", default=10.0)),
             server_api_token=server_api_token,
@@ -157,6 +187,20 @@ def _string(
     if value is not None and not isinstance(value, str):
         raise RuntimeConfigError(f"{key} must be a string")
     return value
+
+
+def _boolean(
+    env: Mapping[str, str], env_name: str, raw: Mapping[str, Any], key: str,
+    *, default: bool,
+) -> bool:
+    value = _value(env, env_name, raw, key, default=default)
+    if type(value) is bool:
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeConfigError(f"{env_name} must be a boolean")
 
 
 def _is_local_host(host: str) -> bool:

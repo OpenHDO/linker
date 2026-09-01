@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Protocol
 from uuid import UUID
 
 from .config import Credentials, LinkerConfig
 from .driver import VendorRgbDriver
-from .models import DeviceDescriptor, LightState, Rgb
+from .models import DeviceDescriptor, DiscoveryCandidate, LightState, Rgb
 from .protocol import Envelope
 
 
@@ -76,6 +77,47 @@ class LinkerBoundary:
     async def discover(self) -> tuple[DeviceDescriptor, ...]:
         return tuple(await self.driver.discover(self.config.discovery, self.credentials))
 
+    @property
+    def control_enabled(self) -> bool:
+        return self.light_id is not None and self.device_id is not None
+
+    async def handle_discovery(self, start: Envelope) -> tuple[Envelope, ...]:
+        session_id, timeout_s = _discovery_request(start)
+        discovery_config = replace(self.config.discovery, timeout_s=float(timeout_s))
+        try:
+            descriptors = await asyncio.wait_for(
+                self.driver.discover(discovery_config, self.credentials), timeout=timeout_s
+            )
+            candidates = tuple(DiscoveryCandidate.from_descriptor(descriptor) for descriptor in descriptors)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            return (self._discovery_completed(start, session_id, "failed", "discovery timed out"),)
+        except Exception:
+            # Discovery errors may contain device addresses or driver credentials.
+            return (self._discovery_completed(start, session_id, "failed", "discovery failed"),)
+
+        messages = tuple(
+            Envelope(
+                type="discovery.candidate",
+                source=self.config.id,
+                correlation_id=start.id,
+                payload={"session_id": str(session_id), **candidate.to_payload()},
+            )
+            for candidate in candidates
+        )
+        return messages + (self._discovery_completed(start, session_id, "completed", None),)
+
+    def _discovery_completed(
+        self, start: Envelope, session_id: UUID, status: str, error: str | None
+    ) -> Envelope:
+        return Envelope(
+            type="discovery.completed",
+            source=self.config.id,
+            correlation_id=start.id,
+            payload={"session_id": str(session_id), "status": status, "error": error},
+        )
+
     def state(self, state: LightState) -> Envelope:
         return Envelope(
             type="light.state.reported",
@@ -83,7 +125,9 @@ class LinkerBoundary:
             payload=state.to_payload(light_id=self.light_id),
         )
 
-    async def handle(self, command: Envelope) -> Envelope:
+    async def handle(self, command: Envelope) -> Envelope | tuple[Envelope, ...]:
+        if command.type == "discovery.start":
+            return await self.handle_discovery(command)
         if command.type not in self._COMMAND_TYPES:
             raise ValueError(f"unsupported message type: {command.type}")
         if command.correlation_id is None:
@@ -198,3 +242,18 @@ def _brightness(value: object) -> int:
     if type(value) is not int or not 0 <= value <= 255:
         raise ValueError("brightness must be an integer from 0 to 255")
     return value
+
+
+def _discovery_request(start: Envelope) -> tuple[UUID, int]:
+    if start.type != "discovery.start":
+        raise ValueError("discovery request must use discovery.start")
+    if start.correlation_id != start.id:
+        raise ValueError("discovery.start correlation_id must equal envelope id")
+    unknown = set(start.payload) - {"session_id", "timeout_s"}
+    if unknown:
+        raise ValueError(f"unknown discovery.start fields: {', '.join(sorted(unknown))}")
+    session_id = _required_uuid(start.payload, "session_id")
+    timeout = start.payload.get("timeout_s")
+    if type(timeout) is not int or not 1 <= timeout <= 60:
+        raise ValueError("timeout_s must be an integer from 1 to 60")
+    return session_id, timeout

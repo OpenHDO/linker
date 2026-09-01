@@ -65,6 +65,46 @@ class DeviceDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryCandidate:
+    """The vendor-neutral candidate sent to the server after LAN discovery."""
+
+    candidate_id: str
+    name: str
+    capabilities: tuple[Mapping[str, Any], ...]
+    transport: str = "wifi"
+    requires_pairing: bool = True
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"^[a-z][a-z0-9._-]{1,63}$", self.candidate_id):
+            raise ValueError("candidate_id must be a lowercase OpenHDO identifier")
+        if not self.name or len(self.name) > 128:
+            raise ValueError("candidate name must contain 1 to 128 characters")
+        if self.transport != "wifi":
+            raise ValueError("discovery transport must be wifi")
+        if not self.capabilities:
+            raise ValueError("discovery candidates require at least one capability")
+        if type(self.requires_pairing) is not bool:
+            raise ValueError("requires_pairing must be boolean")
+
+    @classmethod
+    def from_descriptor(cls, descriptor: DeviceDescriptor) -> "DiscoveryCandidate":
+        payload = descriptor.to_payload()
+        capabilities = payload["capabilities"]
+        if not isinstance(capabilities, list):
+            raise ValueError("device descriptor capabilities must be a list")
+        return cls(descriptor.id, descriptor.name, tuple(capabilities))
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "name": self.name,
+            "transport": self.transport,
+            "capabilities": [dict(capability) for capability in self.capabilities],
+            "requires_pairing": self.requires_pairing,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class LightState:
     device_id: str
     available: bool

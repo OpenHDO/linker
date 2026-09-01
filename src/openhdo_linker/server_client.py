@@ -57,19 +57,24 @@ class LinkerServerClient:
     async def _session(self, websocket: Any, process_stop: asyncio.Event) -> None:
         await self._send(websocket, self.boundary.register())
         session_stop = asyncio.Event()
-        publisher = asyncio.create_task(self._publish_states(websocket, session_stop), name="openhdo-state-publisher")
         receiver = asyncio.create_task(self._receive_loop(websocket), name="openhdo-command-receiver")
         stopper = asyncio.create_task(process_stop.wait(), name="openhdo-process-stop")
+        publisher = (
+            asyncio.create_task(self._publish_states(websocket, session_stop), name="openhdo-state-publisher")
+            if self.boundary.control_enabled
+            else None
+        )
         try:
             done, _ = await asyncio.wait((receiver, stopper), return_when=asyncio.FIRST_COMPLETED)
             if receiver in done:
                 await receiver
         finally:
             session_stop.set()
-            for task in (receiver, stopper, publisher):
+            tasks = (receiver, stopper) if publisher is None else (receiver, stopper, publisher)
+            for task in tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(receiver, stopper, publisher, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             await self.boundary.driver.disconnect()
 
     async def _receive_loop(self, websocket: Any) -> None:
@@ -81,6 +86,14 @@ class LinkerServerClient:
             message = Envelope.from_json(raw)
         except ProtocolError as error:
             self.logger.warning("rejected invalid server envelope: %s", error)
+            return
+        if message.type == "discovery.start":
+            try:
+                messages = await self.boundary.handle_discovery(message)
+            except (KeyError, TypeError, ValueError) as error:
+                self.logger.warning("rejected invalid discovery.start: %s", error)
+                return
+            await self._send_many(websocket, messages)
             return
         if not message.type.startswith("light.command."):
             self.logger.warning("ignored unsupported server message type: %s", message.type)
@@ -131,6 +144,10 @@ class LinkerServerClient:
     async def _send(self, websocket: Any, message: Envelope) -> None:
         async with self._send_lock:
             await websocket.send(message.to_json())
+
+    async def _send_many(self, websocket: Any, messages: tuple[Envelope, ...]) -> None:
+        for message in messages:
+            await self._send(websocket, message)
 
 
 async def _wait_or_stop(stop: asyncio.Event, timeout: float) -> bool:

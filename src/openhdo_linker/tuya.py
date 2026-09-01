@@ -420,7 +420,7 @@ class TuyaLocalDriver(VendorRgbDriver):
         if not self.discovery_options.enabled:
             return ()
         found = await asyncio.to_thread(self._discover_sync, config.timeout_s)
-        return tuple(self._descriptor(item["id"]) for item in found)
+        return tuple(self._discovery_descriptor(item["id"]) for item in found)
 
     @property
     def device(self) -> TuyaDeviceConfig:
@@ -435,6 +435,12 @@ class TuyaLocalDriver(VendorRgbDriver):
             return DeviceDescriptor(device_id, "LED lamp")
         color_modes = ("RGBW",) if self.device.dps is not None and self.device.dps.white is not None else ("RGB",)
         return DeviceDescriptor(device_id, self.device.public_name, color_modes)
+
+    @staticmethod
+    def _discovery_descriptor(device_id: str) -> DeviceDescriptor:
+        # The real Tuya ID remains linker-local; the server receives a stable opaque identifier.
+        candidate_id = f"light.{hashlib.sha256(device_id.encode('utf-8')).hexdigest()[:32]}"
+        return DeviceDescriptor(candidate_id, "LED lamp")
 
     def _discover_sync(self, timeout_s: float) -> list[dict[str, str]]:
         sockets: list[socket.socket] = []

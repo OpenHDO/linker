@@ -3,7 +3,7 @@
 from .boundary import LinkerBoundary, MemoryCommandJournal
 from .config import Credentials, DiscoveryConfig, LinkerConfig
 from .driver import ConnectionSupervisor, VendorRgbDriver
-from .models import DeviceDescriptor, DriverHealth, LightState, Rgb
+from .models import DeviceDescriptor, DiscoveryCandidate, DriverHealth, LightState, Rgb
 from .protocol import Envelope, ProtocolError
 from .runtime_config import RuntimeConfig, RuntimeConfigError
 from .server_client import LinkerServerClient
@@ -22,6 +22,7 @@ __all__ = [
     "ConnectionSupervisor",
     "Credentials",
     "DeviceDescriptor",
+    "DiscoveryCandidate",
     "DiscoveryConfig",
     "DriverHealth",
     "Envelope",

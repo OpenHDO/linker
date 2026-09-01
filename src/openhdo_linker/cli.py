@@ -12,10 +12,21 @@ import signal
 import sys
 
 from .boundary import LinkerBoundary
-from .config import Credentials
+from .config import Credentials, DiscoveryConfig
+from .models import DiscoveryCandidate
 from .runtime_config import RuntimeConfig, RuntimeConfigError
 from .server_client import LinkerServerClient
-from .tuya import SUPPORTED_PROTOCOLS, TuyaDeviceConfig, TuyaLocalDriver
+from .tuya import SUPPORTED_PROTOCOLS, TuyaDeviceConfig, TuyaDiscoveryOptions, TuyaLocalDriver
+
+
+def _timeout(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("timeout must be an integer from 1 to 60") from error
+    if not 1 <= parsed <= 60:
+        raise argparse.ArgumentTypeError("timeout must be an integer from 1 to 60")
+    return parsed
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -29,6 +40,8 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--local-key", help="automation override for the local key; prefer OPENHDO_TUYA_LOCAL_KEY")
     inspect.add_argument("--protocol-version", required=True, choices=SUPPORTED_PROTOCOLS)
     inspect.add_argument("--timeout", type=float, default=3.0, help="TCP/query timeout in seconds (0 < timeout <= 60)")
+    discover = commands.add_parser("discover", help="scan the local LAN for real Tuya-compatible devices")
+    discover.add_argument("--timeout", type=_timeout, default=5, help="UDP scan timeout in seconds (1 <= timeout <= 60)")
     return parser
 
 
@@ -104,16 +117,41 @@ async def _inspect(args: argparse.Namespace) -> int:
         await driver.disconnect()
 
 
+async def _discover(args: argparse.Namespace) -> int:
+    driver = TuyaLocalDriver(discovery=TuyaDiscoveryOptions(enabled=True))
+    try:
+        try:
+            descriptors = await driver.discover(DiscoveryConfig(timeout_s=float(args.timeout)), Credentials())
+            payload = {
+                "candidates": [DiscoveryCandidate.from_descriptor(descriptor).to_payload() for descriptor in descriptors]
+            }
+            print(json.dumps(payload, sort_keys=True))
+            return 0
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            print(json.dumps({"candidates": [], "error": "discovery failed"}, sort_keys=True))
+            return 2
+    finally:
+        await driver.disconnect()
+
+
 async def _run(config: RuntimeConfig) -> None:
-    driver = TuyaLocalDriver(config.device)
-    boundary = LinkerBoundary(
-        config.linker,
-        Credentials({"local_key": config.device.local_key}),
-        driver,
-        light_id=config.light_id,
-        device_id=config.device.device_id,
-        descriptor=driver.descriptor(config.light_id),
-    )
+    discovery = TuyaDiscoveryOptions(enabled=config.discovery_enabled)
+    if config.discovery_only:
+        driver = TuyaLocalDriver(discovery=discovery)
+        boundary = LinkerBoundary(config.linker, Credentials(), driver)
+    else:
+        assert config.device is not None and config.light_id is not None
+        driver = TuyaLocalDriver(config.device, discovery=discovery)
+        boundary = LinkerBoundary(
+            config.linker,
+            Credentials({"local_key": config.device.local_key}),
+            driver,
+            light_id=config.light_id,
+            device_id=config.device.device_id,
+            descriptor=driver.descriptor(config.light_id),
+        )
     client = LinkerServerClient(
         boundary,
         config.websocket_url,
@@ -141,9 +179,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "inspect":
             return asyncio.run(_inspect(args))
+        if args.command == "discover":
+            return asyncio.run(_discover(args))
         config = RuntimeConfig.from_env(args.config)
         if args.validate:
-            print(f"configuration valid: server={config.websocket_url} light_id={config.light_id}")
+            detail = "mode=discovery-only" if config.discovery_only else f"light_id={config.light_id}"
+            print(f"configuration valid: server={config.websocket_url} {detail}")
             return 0
         asyncio.run(_run(config))
         return 0

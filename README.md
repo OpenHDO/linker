@@ -22,9 +22,9 @@ may connect to one server.
 
 The repository contains the production Python process, WebSocket server client,
 and native local Tuya-compatible Wi-Fi driver. All vendor/model-specific
-details stay inside the Linker. Server-facing descriptors, states, and commands
-are abstract `light` values only; credentials and DP mappings never cross that
-boundary.
+details stay inside the Linker. Server-facing descriptors, discovery candidates,
+states, and commands are abstract `light` values only; credentials and DP
+mappings never cross that boundary.
 
 The supplied Sirius LED Smart C37 is not vendor-confirmed. Web evidence makes
 Tuya/Smart Life plausible, but the driver does not infer that fact or ship a
@@ -54,12 +54,31 @@ device. Protocol 3.5 is rejected explicitly until it has a verified native
 implementation.
 
 UDP discovery is disabled by default. When explicitly enabled with
-`TuyaDiscoveryOptions(enabled=True)`, it sends a LAN broadcast and listens on
-the Tuya discovery ports to learn address/ID metadata only; it cannot recover a
-local key or DP mapping. Discovery results are exposed as abstract `LED lamp`
-descriptors with `light`, `rgb`, `brightness`, and brightness range `0..255`;
-an explicitly configured white DP adds abstract `white` and its `0..255`
-range.
+`TuyaDiscoveryOptions(enabled=True)` (or
+`OPENHDO_TUYA_DISCOVERY_ENABLED=true`), it sends a LAN broadcast and listens on
+the Tuya discovery ports. It cannot recover a local key or DP mapping. The
+WebSocket `discovery.start` request runs this real scan and produces one
+`discovery.candidate` for each real descriptor, followed by
+`discovery.completed`. Candidates contain only `candidate_id`, `name`,
+`transport: "wifi"`, abstract Light capabilities, and `requires_pairing`; the
+real Tuya ID is represented by a stable opaque linker-local identifier. No IP,
+local key, vendor/model, or DP value crosses the boundary.
+
+For an explicit LAN-only scan, use the direct CLI command. It does not load
+server or device configuration and prints only the same sanitized candidate
+shape:
+
+```powershell
+openhdo-linker discover --timeout 5
+```
+
+The long-running process can run without a paired device in discovery-only
+mode. `OPENHDO_DISCOVERY_ONLY=true` requires only `OPENHDO_SERVER` (and linker
+identity overrides if needed), registers an identity with no `devices`, stays
+connected, and answers `discovery.start`. This mode enables LAN discovery by
+default; set `OPENHDO_TUYA_DISCOVERY_ENABLED=false` to disable scans. Normal
+control mode still requires the complete real-device and DP mapping listed
+above.
 
 To inspect the actual DPs before choosing a mapping, query the real device:
 
@@ -105,6 +124,19 @@ the actual white DP and range.
 The smoke command performs real TCP connect, encrypted local poll, response
 validation, and health reporting.
 
+## Discovery HTTP contract
+
+The server owns process-local discovery session state. Authenticated clients
+start a session with `POST /api/v1/discovery/sessions` and body
+`{"linker_id":"<linker_id>","timeout_s":5}`; the server returns `202` with a
+`session_id`. `GET /api/v1/discovery/sessions/{session_id}` returns
+`session_id`, `linker_id`, `status` (`running`, `completed`, or `failed`),
+`candidates`, and `error`. The server sends the corresponding v1
+`discovery.start` envelope to the connected Linker and correlates all returned
+`discovery.candidate` and `discovery.completed` envelopes to that request.
+Timeout, cancellation, disconnect, and scan errors are terminal session
+failures; the Linker never reports secret or device-network details in them.
+
 ## Run the Linker process
 
 The process connects to the Python server runtime at
@@ -134,6 +166,7 @@ $env:OPENHDO_TUYA_DP_COLOR = '<actual color DP>'
 $env:OPENHDO_TUYA_COLOR_FORMAT = '<rgb_hex|hsv_hex>'
 $env:OPENHDO_TUYA_BRIGHTNESS_MIN = '<actual brightness minimum>'
 $env:OPENHDO_TUYA_BRIGHTNESS_MAX = '<actual brightness maximum>'
+$env:OPENHDO_TUYA_DISCOVERY_ENABLED = 'true' # optional; discovery.start is otherwise disabled
 openhdo-linker --validate
 openhdo-linker
 ```

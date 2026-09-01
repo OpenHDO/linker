@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from openhdo_linker import (  # noqa: E402
     Credentials,
     DeviceDescriptor,
+    DiscoveryCandidate,
     Envelope,
     LightState,
     LinkerBoundary,
@@ -23,9 +24,11 @@ from openhdo_linker import (  # noqa: E402
     TuyaConfigurationError,
     TuyaDeviceConfig,
     TuyaDpMapping,
+    TuyaDiscoveryOptions,
     TuyaLocalDriver,
 )
 from openhdo_linker.cli import _inspection_payload, _parser, _resolve_inspect_local_key  # noqa: E402
+from openhdo_linker.server_client import LinkerServerClient  # noqa: E402
 
 
 def env(**overrides: str) -> dict[str, str]:
@@ -46,6 +49,36 @@ def env(**overrides: str) -> dict[str, str]:
     }
     values.update(overrides)
     return values
+
+
+class DiscoveryDriver:
+    def __init__(self, descriptors=(), error: Exception | None = None) -> None:
+        self.descriptors = descriptors
+        self.error = error
+        self.config = None
+
+    async def discover(self, config, credentials):
+        self.config = config
+        if self.error is not None:
+            raise self.error
+        return self.descriptors
+
+    async def disconnect(self) -> None:
+        return None
+
+
+class BlockingDiscoveryDriver(DiscoveryDriver):
+    async def discover(self, config, credentials):
+        await asyncio.Event().wait()
+        return ()
+
+
+class WebSocketSink:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> None:
+        self.messages.append(message)
 
 
 class ConfigTests(unittest.TestCase):
@@ -69,6 +102,12 @@ class ConfigTests(unittest.TestCase):
                 "inspect", "--ip", "192.168.1.20", "--device-id", "tuya-device-1",
                 "--local-key", "0123456789abcdef", "--protocol-version", "3.5",
             ])
+
+        discover = _parser().parse_args(["discover", "--timeout", "7"])
+        self.assertEqual(discover.command, "discover")
+        self.assertEqual(discover.timeout, 7)
+        with self.assertRaises(SystemExit):
+            _parser().parse_args(["discover", "--timeout", "0"])
 
     def test_inspect_local_key_uses_environment_without_exposing_it(self) -> None:
         key = _resolve_inspect_local_key(None, {"OPENHDO_TUYA_LOCAL_KEY": "0123456789abcdef"})
@@ -121,6 +160,19 @@ class ConfigTests(unittest.TestCase):
         del missing_dp["OPENHDO_TUYA_DP_COLOR"]
         with self.assertRaises(RuntimeConfigError):
             RuntimeConfig.from_env(environ=missing_dp)
+
+    def test_discovery_only_mode_needs_no_real_device_config(self) -> None:
+        config = RuntimeConfig.from_env(environ={
+            "OPENHDO_SERVER": "ws://127.0.0.1:8000",
+            "OPENHDO_DISCOVERY_ONLY": "true",
+        })
+        self.assertTrue(config.discovery_only)
+        self.assertTrue(config.discovery_enabled)
+        self.assertIsNone(config.device)
+        self.assertIsNone(config.light_id)
+        boundary = LinkerBoundary(config.linker, Credentials(), TuyaLocalDriver(discovery=TuyaDiscoveryOptions(enabled=True)))
+        self.assertNotIn("devices", boundary.register().payload)
+        self.assertFalse(boundary.control_enabled)
 
     def test_server_token_is_optional_locally_but_required_for_non_local_wss(self) -> None:
         local = RuntimeConfig.from_env(environ=env(OPENHDO_SERVER_TOKEN="server-secret"))
@@ -219,6 +271,103 @@ class EnvelopeMappingTests(unittest.TestCase):
             self.assertIn("error", result.payload)
 
         asyncio.run(check())
+
+
+class DiscoveryEnvelopeTests(unittest.TestCase):
+    def _request(self, *, timeout_s: object = 7, correlation: UUID | None = None) -> Envelope:
+        message_id = UUID(int=100)
+        return Envelope(
+            type="discovery.start",
+            source="openhdo-server",
+            id=message_id,
+            correlation_id=message_id if correlation is None else correlation,
+            payload={"session_id": str(UUID(int=101)), "timeout_s": timeout_s},
+        )
+
+    def test_discovery_emits_one_sanitized_candidate_and_completion(self) -> None:
+        async def check() -> None:
+            descriptor = DeviceDescriptor("candidate.light", "Living room", ("RGB",))
+            driver = DiscoveryDriver([descriptor])
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
+            messages = await boundary.handle_discovery(self._request())
+            self.assertEqual(len(messages), 2)
+            candidate, completed = messages
+            self.assertEqual(candidate.type, "discovery.candidate")
+            self.assertEqual(candidate.correlation_id, UUID(int=100))
+            self.assertEqual(
+                set(candidate.payload),
+                {"session_id", "candidate_id", "name", "transport", "capabilities", "requires_pairing"},
+            )
+            self.assertEqual(candidate.payload["candidate_id"], "candidate.light")
+            self.assertEqual(candidate.payload["transport"], "wifi")
+            self.assertTrue(candidate.payload["requires_pairing"])
+            self.assertNotIn("ip", candidate.payload)
+            self.assertNotIn("local_key", json.dumps(candidate.payload))
+            self.assertEqual(completed.type, "discovery.completed")
+            self.assertEqual(completed.correlation_id, UUID(int=100))
+            self.assertEqual(completed.payload["status"], "completed")
+            self.assertIsNone(completed.payload["error"])
+            self.assertEqual(driver.config.timeout_s, 7.0)
+
+        asyncio.run(check())
+
+    def test_discovery_error_is_failed_without_driver_details(self) -> None:
+        async def check() -> None:
+            driver = DiscoveryDriver(error=RuntimeError("local_key=0123456789abcdef at 192.168.1.20"))
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials({"local_key": "0123456789abcdef"}), driver)
+            messages = await boundary.handle_discovery(self._request())
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0].type, "discovery.completed")
+            self.assertEqual(messages[0].payload["status"], "failed")
+            self.assertEqual(messages[0].payload["error"], "discovery failed")
+            self.assertNotIn("0123456789abcdef", json.dumps(messages[0].to_dict()))
+            self.assertNotIn("192.168.1.20", json.dumps(messages[0].to_dict()))
+
+        asyncio.run(check())
+
+    def test_server_client_sends_all_discovery_envelopes(self) -> None:
+        async def check() -> None:
+            driver = DiscoveryDriver([DeviceDescriptor("candidate.light", "LED lamp")])
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
+            client = LinkerServerClient(boundary, "ws://127.0.0.1:8000")
+            websocket = WebSocketSink()
+            await client._receive(websocket, self._request().to_json())
+            self.assertEqual([Envelope.from_json(value).type for value in websocket.messages], [
+                "discovery.candidate", "discovery.completed"
+            ])
+
+        asyncio.run(check())
+
+    def test_discovery_request_validates_correlation_and_timeout(self) -> None:
+        async def check() -> None:
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), DiscoveryDriver())
+            for request in (
+                self._request(timeout_s=True),
+                self._request(timeout_s=61),
+                self._request(correlation=UUID(int=999)),
+            ):
+                with self.assertRaises(ValueError):
+                    await boundary.handle_discovery(request)
+
+        asyncio.run(check())
+
+    def test_discovery_cancellation_propagates_for_session_cleanup(self) -> None:
+        async def check() -> None:
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), BlockingDiscoveryDriver())
+            task = asyncio.create_task(boundary.handle_discovery(self._request()))
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(check())
+
+    def test_real_tuya_discovery_id_is_opaque_and_abstract(self) -> None:
+        descriptor = TuyaLocalDriver._discovery_descriptor("actual-tuya-device-id")
+        candidate = DiscoveryCandidate.from_descriptor(descriptor).to_payload()
+        self.assertNotIn("actual-tuya-device-id", json.dumps(candidate))
+        self.assertTrue(candidate["candidate_id"].startswith("light."))
+        self.assertEqual(set(candidate), {"candidate_id", "name", "transport", "capabilities", "requires_pairing"})
 
 
 if __name__ == "__main__":

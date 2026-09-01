@@ -12,8 +12,9 @@ The boundary owns:
 - typed discovery configuration and opaque credentials;
 - `DeviceDescriptor`, `LightState`, and RGB value validation;
 - polling and event subscription hooks;
-  - v1 OpenHDO envelopes: `link.register`, `light.state.reported`, the
-  `light.command.*` messages, and `command.result`;
+- v1 OpenHDO envelopes: `link.register`, `discovery.candidate`,
+  `discovery.completed`, `light.state.reported`, the `light.command.*`
+  messages, and `command.result`;
 - command correlation through `correlation_id`;
 - duplicate-safe handling through an injectable `CommandJournal`;
 - reconnect with bounded exponential backoff and health visibility.
@@ -25,6 +26,27 @@ local Tuya framing, AES/HMAC transport, optional UDP discovery, and the
 translation from configured DPs to abstract light capabilities, ranges, and
 state. The process connects directly to the Python server runtime over its
 WebSocket linker endpoint.
+
+## Discovery integration
+
+`discovery.start` is accepted only with a UUID `session_id`, an integer
+`timeout_s` from 1 through 60, and `correlation_id` equal to the start envelope
+ID. The boundary passes that timeout to the concrete driver, emits one
+`discovery.candidate` per descriptor, and always emits a correlated
+`discovery.completed` for a successful or failed scan. A cancelled scan is
+cancelled with the WebSocket session; a timeout or driver failure is converted
+to a secret-free failed completion. Candidate IDs are opaque identifiers and
+candidate payloads contain only the abstract Light capability plus
+`requires_pairing`; local Tuya address, credentials, protocol, model, and DP
+mapping remain linker-local. Pairing and cloud discovery are deliberately not
+implemented.
+
+The explicit `OPENHDO_DISCOVERY_ONLY=true` runtime mode constructs the driver
+without a `TuyaDeviceConfig`, registers the Linker identity with no devices,
+and keeps the WebSocket session alive for discovery messages. The default
+control mode continues to reject incomplete IP, device ID, local key, protocol,
+and DP mapping configuration. The standalone `openhdo-linker discover` command
+uses the same real UDP scan and prints only sanitized abstract candidates.
 
 ## Consequences
 
