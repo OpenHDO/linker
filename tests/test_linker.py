@@ -29,6 +29,7 @@ from openhdo_linker import (  # noqa: E402
     TuyaLocalDriver,
 )
 from openhdo_linker.cli import _inspection_payload, _parser, _resolve_inspect_local_key  # noqa: E402
+from openhdo_linker.boundary import DISCOVERY_MIN_SCAN_S, DISCOVERY_PROTOCOL_MARGIN_S  # noqa: E402
 from openhdo_linker.server_client import LinkerServerClient  # noqa: E402
 from openhdo_linker.tuya import (  # noqa: E402
     COMMAND_REQUEST_DEVICE_INFO,
@@ -321,7 +322,18 @@ class DiscoveryEnvelopeTests(unittest.TestCase):
             self.assertEqual(completed.correlation_id, UUID(int=100))
             self.assertEqual(completed.payload["status"], "completed")
             self.assertIsNone(completed.payload["error"])
-            self.assertEqual(driver.config.timeout_s, 7.0)
+            self.assertEqual(driver.config.timeout_s, 7.0 - DISCOVERY_PROTOCOL_MARGIN_S)
+
+        asyncio.run(check())
+
+    def test_discovery_timeout_floor_keeps_one_second_scan_and_completion(self) -> None:
+        async def check() -> None:
+            driver = DiscoveryDriver()
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
+            messages = await boundary.handle_discovery(self._request(timeout_s=1))
+            self.assertEqual(driver.config.timeout_s, DISCOVERY_MIN_SCAN_S)
+            self.assertEqual(messages[-1].type, "discovery.completed")
+            self.assertEqual(messages[-1].payload["status"], "completed")
 
         asyncio.run(check())
 

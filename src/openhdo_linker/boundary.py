@@ -13,6 +13,9 @@ from .driver import VendorRgbDriver
 from .models import DeviceDescriptor, DiscoveryCandidate, LightState, Rgb
 from .protocol import Envelope
 
+DISCOVERY_PROTOCOL_MARGIN_S = 0.25
+DISCOVERY_MIN_SCAN_S = 1.0
+
 
 class CommandJournal(Protocol):
     async def get(self, idempotency_key: str) -> Mapping[str, object] | None: ...
@@ -83,10 +86,13 @@ class LinkerBoundary:
 
     async def handle_discovery(self, start: Envelope) -> tuple[Envelope, ...]:
         session_id, timeout_s = _discovery_request(start)
-        discovery_config = replace(self.config.discovery, timeout_s=float(timeout_s))
+        # Leave bounded time for candidate envelopes and the completion frame
+        # to reach the server before its process-local session deadline.
+        effective_timeout_s = max(DISCOVERY_MIN_SCAN_S, timeout_s - DISCOVERY_PROTOCOL_MARGIN_S)
+        discovery_config = replace(self.config.discovery, timeout_s=effective_timeout_s)
         try:
             descriptors = await asyncio.wait_for(
-                self.driver.discover(discovery_config, self.credentials), timeout=timeout_s
+                self.driver.discover(discovery_config, self.credentials), timeout=effective_timeout_s
             )
             candidates = tuple(DiscoveryCandidate.from_descriptor(descriptor) for descriptor in descriptors)
         except asyncio.CancelledError:

@@ -53,6 +53,11 @@ Tuya local discovery protocol. It is deliberately separate from EZ/AP Wi-Fi
 provisioning, pairing, cloud onboarding, and local-key recovery; none of those
 flows are implemented or implied by `discovery.start`.
 
+The boundary reserves `DISCOVERY_PROTOCOL_MARGIN_S = 0.25` seconds for
+outbound discovery envelopes. The concrete driver receives
+`max(1.0, timeout_s - 0.25)`, so a valid request always retains at least one
+second of effective LAN scan time while completion has protocol headroom.
+
 ## Consequences
 
 Pure mapping, parsing, and validation tests run without network access. The
