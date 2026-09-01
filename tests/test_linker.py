@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
@@ -29,6 +30,15 @@ from openhdo_linker import (  # noqa: E402
 )
 from openhdo_linker.cli import _inspection_payload, _parser, _resolve_inspect_local_key  # noqa: E402
 from openhdo_linker.server_client import LinkerServerClient  # noqa: E402
+from openhdo_linker.tuya import (  # noqa: E402
+    COMMAND_REQUEST_DEVICE_INFO,
+    DISCOVERY_UDP_KEY,
+    _aes_encrypt,
+    _frame_6699,
+    _frame_bytes,
+    _parse_6699,
+    _parse_discovery_datagram,
+)
 
 
 def env(**overrides: str) -> dict[str, str]:
@@ -188,6 +198,10 @@ class ConfigTests(unittest.TestCase):
             TuyaDpMapping(1, 1, 5, "rgb_hex", 0, 255)
         with self.assertRaises(TuyaConfigurationError):
             TuyaDpMapping(1, 2, 5, "unknown", 0, 255)
+
+    def test_discovery_ports_are_distinct(self) -> None:
+        with self.assertRaises(TuyaConfigurationError):
+            TuyaDiscoveryOptions(enabled=True, ports=(6666, 6666))
 
 
 class EnvelopeMappingTests(unittest.TestCase):
@@ -368,6 +382,101 @@ class DiscoveryEnvelopeTests(unittest.TestCase):
         self.assertNotIn("actual-tuya-device-id", json.dumps(candidate))
         self.assertTrue(candidate["candidate_id"].startswith("light."))
         self.assertEqual(set(candidate), {"candidate_id", "name", "transport", "capabilities", "requires_pairing"})
+
+
+class TuyaUdpDiscoveryTests(unittest.TestCase):
+    def test_real_udp_formats_verify_integrity_and_require_tuya_identity(self) -> None:
+        device_id = "tuya-device-123"
+        response = json.dumps({
+            "gwId": device_id,
+            "version": "3.1",
+            "localKey": "0123456789abcdef",
+            "productKey": "vendor-detail-stays-local",
+        }, separators=(",", ":")).encode()
+
+        plaintext = _parse_discovery_datagram(response, "192.168.1.20")
+        self.assertEqual(plaintext, {"id": device_id, "ip": "192.168.1.20"})
+
+        legacy = _frame_bytes(
+            1,
+            COMMAND_REQUEST_DEVICE_INFO,
+            _aes_encrypt(response, DISCOVERY_UDP_KEY),
+            protocol_version="3.1",
+            integrity_key=b"",
+        )
+        self.assertEqual(_parse_discovery_datagram(legacy, "192.168.1.20"), plaintext)
+        legacy_with_retcode = _frame_bytes(
+            1,
+            COMMAND_REQUEST_DEVICE_INFO,
+            b"\0\0\0\0" + _aes_encrypt(response, DISCOVERY_UDP_KEY),
+            protocol_version="3.1",
+            integrity_key=b"",
+        )
+        self.assertEqual(_parse_discovery_datagram(legacy_with_retcode, "192.168.1.20"), plaintext)
+        legacy_bad = bytearray(legacy)
+        legacy_bad[-5] ^= 1
+        self.assertIsNone(_parse_discovery_datagram(bytes(legacy_bad), "192.168.1.20"))
+
+        modern = _frame_6699(2, COMMAND_REQUEST_DEVICE_INFO, response, DISCOVERY_UDP_KEY)
+        self.assertEqual(_parse_discovery_datagram(modern, "192.168.1.20"), plaintext)
+        modern_bad = bytearray(modern)
+        modern_bad[30] ^= 1
+        self.assertIsNone(_parse_discovery_datagram(bytes(modern_bad), "192.168.1.20"))
+
+        self.assertIsNone(_parse_discovery_datagram(b'{"id":"arbitrary-json"}', "192.168.1.20"))
+        self.assertNotIn("localKey", json.dumps(plaintext))
+        self.assertNotIn("productKey", json.dumps(plaintext))
+
+    def test_discovery_uses_fixed_listeners_and_one_authenticated_7000_request(self) -> None:
+        class RecordingSocket:
+            instances: list["RecordingSocket"] = []
+
+            def __init__(self, *_args: object) -> None:
+                self.bind_address = None
+                self.options: list[tuple[object, object, object]] = []
+                self.sent: list[tuple[bytes, tuple[str, int]]] = []
+                self.closed = False
+                type(self).instances.append(self)
+
+            def setsockopt(self, level: object, option: object, value: object) -> None:
+                self.options.append((level, option, value))
+
+            def bind(self, address: tuple[str, int]) -> None:
+                self.bind_address = address
+
+            def setblocking(self, _value: bool) -> None:
+                return None
+
+            def sendto(self, data: bytes, address: tuple[str, int]) -> None:
+                self.sent.append((data, address))
+
+            def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+                raise BlockingIOError
+
+            def close(self) -> None:
+                self.closed = True
+
+        RecordingSocket.instances = []
+        driver = TuyaLocalDriver(discovery=TuyaDiscoveryOptions(enabled=True))
+        with (
+            patch("openhdo_linker.tuya.socket.socket", side_effect=RecordingSocket),
+            patch("openhdo_linker.tuya._discovery_local_ip", return_value="192.168.1.10"),
+            patch("openhdo_linker.tuya.select.select", return_value=([], [], [])),
+            patch("openhdo_linker.tuya.time.monotonic", side_effect=(0.0, 0.0, 0.0, 2.0)),
+        ):
+            self.assertEqual(driver._discover_sync(1), [])
+
+        listeners = RecordingSocket.instances[:3]
+        sender = RecordingSocket.instances[3]
+        self.assertEqual([item.bind_address for item in listeners], [("", 6666), ("", 6667), ("", 7000)])
+        self.assertEqual(sender.bind_address, ("", 0))
+        self.assertEqual(len(sender.sent), 1)
+        request, target = sender.sent[0]
+        self.assertEqual(target, ("255.255.255.255", 7000))
+        frame = _parse_6699(request, DISCOVERY_UDP_KEY)
+        self.assertEqual(frame.command, COMMAND_REQUEST_DEVICE_INFO)
+        self.assertEqual(json.loads(frame.payload), {"from": "app", "ip": "192.168.1.10"})
+        self.assertTrue(all(item.closed for item in RecordingSocket.instances))
 
 
 if __name__ == "__main__":

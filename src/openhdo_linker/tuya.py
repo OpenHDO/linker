@@ -17,13 +17,17 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import os
+import re
 import select
 import socket
 import struct
 import time
 from uuid import UUID
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import padding
 
 from .config import Credentials, DiscoveryConfig
@@ -32,6 +36,8 @@ from .models import DeviceDescriptor, DriverHealth, LightState, Rgb
 
 PREFIX = 0x000055AA
 SUFFIX = 0x0000AA55
+PREFIX_6699 = 0x00006699
+SUFFIX_6699 = 0x00009966
 TCP_PORT = 6668
 UDP_PORTS = (6666, 6667, 7000)
 COMMAND_CONTROL = 7
@@ -46,6 +52,9 @@ COMMAND_DP_QUERY_NEW = 16
 COMMAND_REQUEST_DEVICE_INFO = 37
 SUPPORTED_PROTOCOLS = ("3.1", "3.2", "3.3", "3.4")
 DISCOVERY_KEY = b"yGAdlopoPVldABfn"
+DISCOVERY_UDP_KEY = hashlib.md5(DISCOVERY_KEY).digest()
+DISCOVERY_PROTOCOLS = ("3.1", "3.2", "3.3", "3.4", "3.5")
+DISCOVERY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 VERSION_HEADER = {version: version.encode("ascii") + b"\0" * 12 for version in SUPPORTED_PROTOCOLS}
 NO_VERSION_HEADER = {
     COMMAND_DP_QUERY,
@@ -238,6 +247,8 @@ class TuyaDiscoveryOptions:
             raise TuyaConfigurationError("discovery only permits the global LAN broadcast address")
         if not self.ports or any(type(port) is not int or not 1 <= port <= 65535 for port in self.ports):
             raise TuyaConfigurationError("discovery ports must be valid UDP ports")
+        if len(set(self.ports)) != len(self.ports):
+            raise TuyaConfigurationError("discovery ports must be distinct")
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +305,17 @@ def _frame_bytes(sequence: int, command: int, payload: bytes, *, protocol_versio
     return signed + trailer + struct.pack(">I", SUFFIX)
 
 
+def _frame_6699(sequence: int, command: int, payload: bytes, key: bytes) -> bytes:
+    """Build the authenticated AES-GCM frame used by current UDP discovery."""
+
+    nonce = os.urandom(12)
+    length = len(nonce) + len(payload) + 16
+    header = struct.pack(">I H I I I", PREFIX_6699, 0, sequence, command, length)
+    # Tuya authenticates every header field after the prefix as AAD.
+    encrypted = AESGCM(key).encrypt(nonce, payload, header[4:])
+    return header + nonce + encrypted + struct.pack(">I", SUFFIX_6699)
+
+
 def parse_frame(data: bytes, *, protocol_version: str, integrity_key: bytes) -> TuyaFrame:
     if len(data) < 24 or data[:4] != struct.pack(">I", PREFIX) or data[-4:] != struct.pack(">I", SUFFIX):
         raise TuyaProtocolError("invalid Tuya frame prefix or suffix")
@@ -339,6 +361,59 @@ def decode_payload(frame: TuyaFrame, *, protocol_version: str, key: bytes, sessi
         encryption_key = session_key if protocol_version == "3.4" and session_key is not None else key
         return _aes_decrypt(encrypted, encryption_key)
     return payload
+
+
+def _parse_6699(data: bytes, key: bytes) -> TuyaFrame:
+    header_size = 18
+    suffix_size = 4
+    minimum_length = 12 + 16
+    if (
+        len(data) < header_size + minimum_length + suffix_size
+        or data[:4] != struct.pack(">I", PREFIX_6699)
+        or data[-4:] != struct.pack(">I", SUFFIX_6699)
+    ):
+        raise TuyaProtocolError("invalid Tuya 6699 frame prefix or suffix")
+    _, reserved, sequence, command, length = struct.unpack(">I H I I I", data[:header_size])
+    if reserved != 0 or length < minimum_length or len(data) != header_size + length + suffix_size:
+        raise TuyaProtocolError("invalid Tuya 6699 frame length")
+    encrypted = data[header_size : header_size + length]
+    try:
+        payload = AESGCM(key).decrypt(encrypted[:12], encrypted[12:], data[4:header_size])
+    except (InvalidTag, ValueError) as error:
+        raise TuyaProtocolError("Tuya 6699 discovery authentication failed") from error
+    return TuyaFrame(sequence, command, payload)
+
+
+def _json_payloads(payload: bytes) -> tuple[bytes, ...]:
+    payload = payload.rstrip(b"\0").strip(b" \t\r\n")
+    candidates = [payload]
+    if payload.startswith(b"\0\0\0\0"):
+        candidates.insert(0, payload[4:].rstrip(b"\0").strip(b" \t\r\n"))
+    return tuple(candidate for candidate in candidates if candidate.startswith(b"{"))
+
+
+def _discovery_item(value: object, source_ip: str) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    device_id = value.get("gwId") or value.get("devId")
+    if not isinstance(device_id, str) or not DISCOVERY_ID_RE.fullmatch(device_id):
+        return None
+    version = value.get("version")
+    if version is not None and str(version) not in DISCOVERY_PROTOCOLS:
+        return None
+    return {"id": device_id, "ip": source_ip}
+
+
+def _parse_discovery_json(payload: bytes, source_ip: str) -> dict[str, str] | None:
+    for candidate in _json_payloads(payload):
+        try:
+            value = json.loads(candidate)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        item = _discovery_item(value, source_ip)
+        if item is not None:
+            return item
+    return None
 
 
 def _without_retcode(payload: bytes) -> bytes:
@@ -444,24 +519,38 @@ class TuyaLocalDriver(VendorRgbDriver):
 
     def _discover_sync(self, timeout_s: float) -> list[dict[str, str]]:
         sockets: list[socket.socket] = []
+        sender: socket.socket | None = None
         found: dict[str, str] = {}
         try:
             for port in self.discovery_options.ports:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind(("", port))
                 sock.setblocking(False)
                 sockets.append(sock)
-            request = _frame_bytes(0, COMMAND_REQUEST_DEVICE_INFO, b"", protocol_version="3.1", integrity_key=b"")
-            for sock in sockets:
-                sock.sendto(request, (self.discovery_options.broadcast_address, 7000))
+            sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sender.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sender.bind(("", 0))
+            local_ip = _discovery_local_ip(self.discovery_options.broadcast_address)
+            if local_ip is not None:
+                request = _frame_6699(
+                    0,
+                    COMMAND_REQUEST_DEVICE_INFO,
+                    _json_bytes({"from": "app", "ip": local_ip}),
+                    DISCOVERY_UDP_KEY,
+                )
+                sender.sendto(request, (self.discovery_options.broadcast_address, 7000))
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
                 remaining = max(0.0, deadline - time.monotonic())
                 readable, _, _ = select.select(sockets, [], [], remaining)
                 for sock in readable:
-                    data, address = sock.recvfrom(65535)
+                    try:
+                        data, address = sock.recvfrom(65535)
+                    except OSError:
+                        # Windows can report an asynchronous ICMP/reset error on
+                        # an unconnected UDP socket. Continue the bounded scan.
+                        continue
                     item = _parse_discovery_datagram(data, address[0])
                     if item and item.get("id"):
                         found[item["id"]] = item.get("ip", address[0])
@@ -469,6 +558,8 @@ class TuyaLocalDriver(VendorRgbDriver):
         finally:
             for sock in sockets:
                 sock.close()
+            if sender is not None:
+                sender.close()
 
     async def connect(self) -> None:
         if self._writer is not None and not self._writer.is_closing():
@@ -743,16 +834,59 @@ async def _read_frame(reader: asyncio.StreamReader, protocol_version: str, integ
     return parse_frame(header + rest, protocol_version=protocol_version, integrity_key=integrity_key)
 
 
-def _parse_discovery_datagram(data: bytes, ip: str) -> dict[str, str] | None:
-    for protocol, key in (("3.1", DISCOVERY_KEY), ("3.4", DISCOVERY_KEY)):
+def _discovery_local_ip(broadcast_address: str) -> str | None:
+    """Find the IPv4 address Windows will use for the discovery route."""
+
+    for target in ((broadcast_address, 7000), ("192.0.2.1", 1)):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            frame = parse_frame(data, protocol_version=protocol, integrity_key=key)
-            payload = decode_payload(frame, protocol_version=protocol, key=key)
-            value = json.loads(payload)
-            if isinstance(value, Mapping):
-                device_id = value.get("gwId") or value.get("devId") or value.get("id")
-                if isinstance(device_id, str):
-                    return {"id": device_id, "ip": str(value.get("ip", ip))}
-        except (TuyaProtocolError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            probe.connect(target)
+            address = probe.getsockname()[0]
+            parsed = ipaddress.ip_address(address)
+            if parsed.version == 4 and not parsed.is_loopback and not parsed.is_unspecified:
+                return address
+        except OSError:
             continue
+        finally:
+            probe.close()
+    return None
+
+
+def _parse_discovery_datagram(data: bytes, ip: str) -> dict[str, str] | None:
+    payloads: list[bytes] = []
+    if data[:4] == struct.pack(">I", PREFIX_6699):
+        try:
+            frame = _parse_6699(data, DISCOVERY_UDP_KEY)
+        except TuyaProtocolError:
+            return None
+        if frame.command != COMMAND_REQUEST_DEVICE_INFO:
+            return None
+        payloads.append(frame.payload)
+    elif data[:4] == struct.pack(">I", PREFIX):
+        try:
+            # Legacy UDP discovery uses a CRC-protected 55AA envelope. Its
+            # payload, when encrypted, uses the MD5-derived discovery key.
+            frame = parse_frame(data, protocol_version="3.1", integrity_key=b"")
+        except TuyaProtocolError:
+            return None
+        payloads.append(frame.payload)
+        encrypted_payloads = tuple(dict.fromkeys((frame.payload, _without_retcode(frame.payload))))
+        for encrypted_payload in encrypted_payloads:
+            try:
+                payloads.append(_aes_decrypt(encrypted_payload, DISCOVERY_UDP_KEY))
+            except (TuyaProtocolError, ValueError):
+                continue
+    else:
+        # v3.1 discovery is a plaintext JSON datagram; legacy devices may
+        # instead send the raw AES-ECB payload without a 55AA envelope.
+        payloads.append(data)
+        try:
+            payloads.append(_aes_decrypt(data, DISCOVERY_UDP_KEY))
+        except (TuyaProtocolError, ValueError):
+            pass
+
+    for payload in payloads:
+        item = _parse_discovery_json(payload, ip)
+        if item is not None:
+            return item
     return None

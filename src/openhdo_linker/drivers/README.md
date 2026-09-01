@@ -10,5 +10,7 @@ The core boundary must remain independent of vendor SDKs and protocol details.
 The native local Tuya-compatible implementation is `openhdo_linker.tuya`.
 Its configuration and protocol handling are linker-internal. The only values
 published toward the server are abstract light descriptors, ranges, states,
-and commands; never local keys, vendor names, or DP mappings. See the root
-README for the real-device onboarding inputs and LAN smoke command.
+and commands; never local keys, vendor names, or DP mappings. Its UDP scan is
+limited to discovery of already Wi-Fi-associated devices on the LAN; it is not
+EZ/AP provisioning, pairing, cloud onboarding, or local-key recovery. See the
+root README for the real-device onboarding inputs and LAN smoke command.

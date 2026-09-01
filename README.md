@@ -7,7 +7,7 @@ device-specific protocols into OpenHDO messages.
 ## Owns
 
 - transport and device drivers;
-- discovery, pairing, and local inventory;
+- LAN discovery of already-onboarded devices and local inventory;
 - local hardware credentials;
 - device state and event publication;
 - validated command handling and health reporting.
@@ -55,10 +55,20 @@ implementation.
 
 UDP discovery is disabled by default. When explicitly enabled with
 `TuyaDiscoveryOptions(enabled=True)` (or
-`OPENHDO_TUYA_DISCOVERY_ENABLED=true`), it sends a LAN broadcast and listens on
-the Tuya discovery ports. It cannot recover a local key or DP mapping. The
+`OPENHDO_TUYA_DISCOVERY_ENABLED=true`), it sends a real Tuya LAN solicitation
+to UDP/7000 and listens on the discovery ports. It discovers only devices that
+are already connected to Wi-Fi and answer the local UDP protocol. This is not
+EZ mode or AP mode Wi-Fi provisioning, pairing, cloud onboarding, or local-key
+recovery: the Linker does not create an access point, configure SSIDs, or
+promise a provisioning flow. It cannot recover a local key or DP mapping. The
+implementation handles the real Tuya plaintext v3.1, legacy CRC/AES UDP, and
+6699/AES-GCM discovery envelopes; local control still supports only the
+explicitly implemented protocol versions above. The default destination is the
+global IPv4 broadcast address, so the LAN and host firewall must allow local
+broadcast traffic; no fallback or fake candidate is generated when it does not.
+The
 WebSocket `discovery.start` request runs this real scan and produces one
-`discovery.candidate` for each real descriptor, followed by
+`discovery.candidate` for each validated descriptor, followed by
 `discovery.completed`. Candidates contain only `candidate_id`, `name`,
 `transport: "wifi"`, abstract Light capabilities, and `requires_pairing`; the
 real Tuya ID is represented by a stable opaque linker-local identifier. No IP,
@@ -72,13 +82,13 @@ shape:
 openhdo-linker discover --timeout 5
 ```
 
-The long-running process can run without a paired device in discovery-only
+The long-running process can run without a configured device in discovery-only
 mode. `OPENHDO_DISCOVERY_ONLY=true` requires only `OPENHDO_SERVER` (and linker
 identity overrides if needed), registers an identity with no `devices`, stays
 connected, and answers `discovery.start`. This mode enables LAN discovery by
 default; set `OPENHDO_TUYA_DISCOVERY_ENABLED=false` to disable scans. Normal
 control mode still requires the complete real-device and DP mapping listed
-above.
+above. Discovery-only mode does not add EZ/AP provisioning or pairing.
 
 To inspect the actual DPs before choosing a mapping, query the real device:
 

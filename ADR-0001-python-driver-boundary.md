@@ -48,6 +48,11 @@ control mode continues to reject incomplete IP, device ID, local key, protocol,
 and DP mapping configuration. The standalone `openhdo-linker discover` command
 uses the same real UDP scan and prints only sanitized abstract candidates.
 
+The UDP scan is LAN discovery of Wi-Fi-associated devices that respond to the
+Tuya local discovery protocol. It is deliberately separate from EZ/AP Wi-Fi
+provisioning, pairing, cloud onboarding, and local-key recovery; none of those
+flows are implemented or implied by `discovery.start`.
+
 ## Consequences
 
 Pure mapping, parsing, and validation tests run without network access. The
