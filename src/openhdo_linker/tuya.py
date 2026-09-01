@@ -1,9 +1,8 @@
 """Native local Tuya-compatible Wi-Fi driver.
 
-Only the local LAN protocol is implemented here.  There is no cloud, Home
-Assistant, simulator, or gateway dependency.  Device-specific assumptions
-live in :class:`TuyaDeviceConfig`, and missing credentials/mappings fail at
-construction time instead of producing a pretend device.
+Only the local LAN protocol is implemented here. Device-specific assumptions
+live in :class:`TuyaDeviceConfig`, and missing credentials or mappings fail at
+construction time.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import asyncio
 import base64
 import binascii
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -183,7 +182,7 @@ class TuyaDeviceConfig:
 
     ip: str
     device_id: str
-    local_key: str
+    local_key: str = field(repr=False)
     protocol_version: str
     dps: TuyaDpMapping
     public_name: str = "LED lamp"
@@ -385,8 +384,10 @@ def state_from_dps(device_id: str, dps: Mapping[int, object], mapping: TuyaDpMap
     power = dps[mapping.power]
     if not isinstance(power, bool):
         raise TuyaProtocolError("configured power DP is not boolean")
-    rgb = mapping.decode_color(dps[mapping.color]) if mapping.color in dps else None
-    brightness = mapping.brightness_from_dp(dps[mapping.brightness]) if mapping.brightness in dps else None
+    if mapping.brightness not in dps or mapping.color not in dps:
+        raise TuyaProtocolError("configured brightness and color DPs are absent")
+    rgb = mapping.decode_color(dps[mapping.color])
+    brightness = mapping.brightness_from_dp(dps[mapping.brightness])
     white = mapping.white_from_dp(dps[mapping.white]) if mapping.white is not None and mapping.white in dps else None
     return LightState(device_id, True, power, rgb, brightness, observed_at, white)
 
@@ -432,12 +433,8 @@ class TuyaLocalDriver(VendorRgbDriver):
     def _descriptor(self, device_id: str) -> DeviceDescriptor:
         if self._device is None:
             return DeviceDescriptor(device_id, "LED lamp")
-        capabilities = ["light", "rgb", "brightness"]
-        ranges: dict[str, dict[str, int]] = {"brightness": {"min": 0, "max": 255}}
-        if self.device.dps.white is not None:
-            capabilities.append("white")
-            ranges["white"] = {"min": 0, "max": 255}
-        return DeviceDescriptor(device_id, self.device.public_name, tuple(capabilities), ranges)
+        color_modes = ("RGBW",) if self.device.dps.white is not None else ("RGB",)
+        return DeviceDescriptor(device_id, self.device.public_name, color_modes)
 
     def _discover_sync(self, timeout_s: float) -> list[dict[str, str]]:
         sockets: list[socket.socket] = []
@@ -507,9 +504,21 @@ class TuyaLocalDriver(VendorRgbDriver):
             body = {"dps": {str(index): None for index in (self.device.dps.power, self.device.dps.brightness, self.device.dps.color)}}
         payload = await self._exchange(COMMAND_DP_QUERY_NEW if self.device.protocol_version == "3.4" else COMMAND_DP_QUERY, body)
         self._raw_dps = parse_dps(payload)
-        state = state_from_dps(self.device.device_id, self._raw_dps, self.device.dps, observed_at=datetime.now(timezone.utc))
+        state = self._revisioned(
+            state_from_dps(self.device.device_id, self._raw_dps, self.device.dps, observed_at=datetime.now(timezone.utc))
+        )
         self._state = state
         return state
+
+    def descriptor(self, light_id: str | None = None) -> DeviceDescriptor:
+        """Return the abstract capability descriptor for the configured device."""
+
+        descriptor = self._descriptor(self.device.device_id)
+        return replace(descriptor, id=light_id) if light_id is not None else descriptor
+
+    def _revisioned(self, state: LightState) -> LightState:
+        revision = 0 if self._state is None else self._state.state_revision + 1
+        return replace(state, state_revision=revision)
 
     async def subscribe_state(self, device_id: str, callback: StateCallback) -> Unsubscribe:
         self._check_device(device_id)
@@ -658,7 +667,9 @@ class TuyaLocalDriver(VendorRgbDriver):
         )
         try:
             self._raw_dps.update(parse_dps(payload))
-            state = state_from_dps(self.device.device_id, self._raw_dps, self.device.dps, observed_at=datetime.now(timezone.utc))
+            state = self._revisioned(
+                state_from_dps(self.device.device_id, self._raw_dps, self.device.dps, observed_at=datetime.now(timezone.utc))
+            )
         except TuyaProtocolError:
             return
         self._state = state

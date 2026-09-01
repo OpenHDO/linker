@@ -12,8 +12,8 @@ The boundary owns:
 - typed discovery configuration and opaque credentials;
 - `DeviceDescriptor`, `LightState`, and RGB value validation;
 - polling and event subscription hooks;
-- v1 OpenHDO envelopes: `link.register`, `link.state`, `command`, and
-  `command.result`;
+  - v1 OpenHDO envelopes: `link.register`, `light.state.reported`, the
+  `light.command.*` messages, and `command.result`;
 - command correlation through `correlation_id`;
 - duplicate-safe handling through an injectable `CommandJournal`;
 - reconnect with bounded exponential backoff and health visibility.
@@ -23,8 +23,8 @@ encoding/decoding, discovery, and vendor-specific retry/acknowledgement rules.
 No vendor-specific data is encoded in the server-facing core. The adapter owns
 local Tuya framing, AES/HMAC transport, optional UDP discovery, and the
 translation from configured DPs to abstract light capabilities, ranges, and
-state. Home Assistant, a gateway, cloud services, and simulated devices are
-out of scope.
+state. The process connects directly to the Python server runtime over its
+WebSocket linker endpoint.
 
 ## Consequences
 

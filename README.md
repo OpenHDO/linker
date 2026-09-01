@@ -20,10 +20,11 @@ may connect to one server.
 
 ## Status
 
-The repository contains the production Python boundary and a native local
-Tuya-compatible Wi-Fi driver. All vendor/model-specific details stay inside
-the Linker. Server-facing descriptors, states, and commands are abstract
-`light` values only; credentials and DP mappings never cross that boundary.
+The repository contains the production Python process, WebSocket server client,
+and native local Tuya-compatible Wi-Fi driver. All vendor/model-specific
+details stay inside the Linker. Server-facing descriptors, states, and commands
+are abstract `light` values only; credentials and DP mappings never cross that
+boundary.
 
 The supplied Sirius LED Smart C37 is not vendor-confirmed. Web evidence makes
 Tuya/Smart Life plausible, but the driver does not infer that fact or ship a
@@ -60,9 +61,8 @@ descriptors with `light`, `rgb`, `brightness`, and brightness range `0..255`;
 an explicitly configured white DP adds abstract `white` and its `0..255`
 range.
 
-Install the runtime dependency and run the read-only smoke command against a
-real device (replace every angle-bracket value with an actual value; do not
-use a sample or fake device):
+Install the runtime and run the read-only smoke command against a real device
+(replace every angle-bracket value with an actual value):
 
 ```powershell
 py -m pip install -e .
@@ -83,13 +83,49 @@ For an RGBW lamp, append `--dp-white`, `--white-min`, and `--white-max` with
 the actual white DP and range.
 
 The smoke command performs real TCP connect, encrypted local poll, response
-validation, and health reporting. It uses no Home Assistant runtime, gateway,
-simulator, mock, or cloud service.
+validation, and health reporting.
 
-The message envelope follows the current `server/contracts/v1` rules: version
-`1`, UUID `id`, ISO-8601 UTC `ts`, `source`, and object `payload`. JSON-line
-transport is a responsibility of the hosting process; `Envelope.to_json()` and
-`Envelope.from_json()` provide the line payload.
+## Run the Linker process
+
+The process connects to the Python server runtime at
+`ws://<server>/api/v1/linkers/<linker_id>`, registers one abstract LED Light,
+publishes `light.state.reported`, receives the v1 `light.command.*` messages,
+and sends `command.result` only after the real device action is confirmed by a
+read-after-write poll. Server-facing messages follow
+[`server/contracts/v1`](https://github.com/OpenHDO/server/tree/master/contracts/v1).
+
+Configuration may come from JSON with environment-variable overrides. For a
+direct environment-based launch, every value below must be replaced with the
+actual onboarding value; `OPENHDO_TUYA_LOCAL_KEY` and all DP mapping values are
+mandatory:
+
+```powershell
+py -m pip install -e .
+$env:OPENHDO_SERVER = 'ws://<server>:<port>'
+$env:OPENHDO_LINKER_ID = '<linker_id>'
+$env:OPENHDO_LIGHT_ID = '<lowercase_light_id>'
+$env:OPENHDO_TUYA_IP = '<actual LAN IP>'
+$env:OPENHDO_TUYA_DEVICE_ID = '<actual device ID>'
+$env:OPENHDO_TUYA_LOCAL_KEY = '<actual 16 ASCII-byte local_key>'
+$env:OPENHDO_TUYA_PROTOCOL = '<3.1|3.2|3.3|3.4>'
+$env:OPENHDO_TUYA_DP_POWER = '<actual power DP>'
+$env:OPENHDO_TUYA_DP_BRIGHTNESS = '<actual brightness DP>'
+$env:OPENHDO_TUYA_DP_COLOR = '<actual color DP>'
+$env:OPENHDO_TUYA_COLOR_FORMAT = '<rgb_hex|hsv_hex>'
+$env:OPENHDO_TUYA_BRIGHTNESS_MIN = '<actual brightness minimum>'
+$env:OPENHDO_TUYA_BRIGHTNESS_MAX = '<actual brightness maximum>'
+openhdo-linker --validate
+openhdo-linker
+```
+
+For RGBW, also set `OPENHDO_TUYA_DP_WHITE`, `OPENHDO_TUYA_WHITE_MIN`, and
+`OPENHDO_TUYA_WHITE_MAX`. The local key is never included in registration,
+state, command, result, or log output.
+
+For a non-local server, use `wss://` and set the optional bearer token as
+`OPENHDO_SERVER_TOKEN`; the Linker sends it only as the WebSocket
+`Authorization: Bearer` header and never logs it. A JSON config may provide the
+same value as `server_api_token` (or `server_config.api_token`).
 
 Run the pure validation/mapping tests:
 

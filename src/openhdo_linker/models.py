@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import re
 from typing import Any, Mapping
 
 
@@ -34,28 +35,32 @@ class Rgb:
 class DeviceDescriptor:
     id: str
     name: str
-    capabilities: tuple[str, ...] = ("light", "rgb", "brightness")
-    ranges: Mapping[str, Mapping[str, int]] = field(
-        default_factory=lambda: {"brightness": {"min": 0, "max": 255}}
-    )
+    color_modes: tuple[str, ...] = ("RGB",)
 
     def __post_init__(self) -> None:
-        if not self.id or not self.name or not self.capabilities:
+        if not re.fullmatch(r"^[a-z][a-z0-9._-]{1,63}$", self.id):
+            raise ValueError("light id must be a lowercase OpenHDO identifier")
+        if not self.name or len(self.name) > 128:
             raise ValueError("device descriptor fields are required")
-        for capability, limits in self.ranges.items():
-            if not isinstance(capability, str) or not isinstance(limits, Mapping):
-                raise ValueError("descriptor ranges must be named integer ranges")
-            if type(limits.get("min")) is not int or type(limits.get("max")) is not int:
-                raise ValueError("descriptor ranges must contain integer min and max")
-            if limits["min"] > limits["max"]:
-                raise ValueError("descriptor range min must not exceed max")
+        if not self.color_modes or any(mode not in {"RGB", "RGBW", "CCT"} for mode in self.color_modes):
+            raise ValueError("color_modes must contain supported Light modes")
+        if len(set(self.color_modes)) != len(self.color_modes):
+            raise ValueError("color_modes must be unique")
 
     def to_payload(self) -> dict[str, Any]:
+        capability: dict[str, Any] = {
+            "kind": "light",
+            "power": True,
+            "brightness": {"min": 0, "max": 255},
+        }
+        if self.color_modes:
+            capability["color_modes"] = list(self.color_modes)
+        if {"RGB", "RGBW"} & set(self.color_modes):
+            capability["rgb_channel_range"] = {"min": 0, "max": 255}
         return {
-            "device_id": self.id,
+            "id": self.id,
             "name": self.name,
-            "capabilities": list(self.capabilities),
-            "ranges": {key: dict(value) for key, value in self.ranges.items()},
+            "capabilities": [capability],
         }
 
 
@@ -68,6 +73,7 @@ class LightState:
     brightness: int | None = None
     observed_at: datetime | None = None
     white: int | None = None
+    state_revision: int = 0
 
     def __post_init__(self) -> None:
         if not self.device_id:
@@ -76,19 +82,19 @@ class LightState:
             raise ValueError("brightness must be an integer from 0 to 255")
         if self.white is not None and (type(self.white) is not int or not 0 <= self.white <= 255):
             raise ValueError("white must be an integer from 0 to 255")
+        if type(self.state_revision) is not int or self.state_revision < 0:
+            raise ValueError("state_revision must be a non-negative integer")
 
-    def to_payload(self) -> dict[str, Any]:
+    def to_payload(self, *, light_id: str | None = None) -> dict[str, Any]:
+        if self.brightness is None or self.rgb is None:
+            raise ValueError("reported Light state requires brightness and rgb")
         result: dict[str, Any] = {
-            "device_id": self.device_id,
-            "available": self.available,
-            "on": self.on,
+            "light_id": light_id or self.device_id,
+            "power": self.on,
+            "brightness": self.brightness,
+            "rgb_color": self.rgb.to_payload(),
+            "state_revision": self.state_revision,
         }
-        if self.rgb is not None:
-            result["rgb"] = self.rgb.to_payload()
-        if self.brightness is not None:
-            result["brightness"] = self.brightness
-        if self.white is not None:
-            result["white"] = self.white
         return result
 
 

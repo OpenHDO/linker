@@ -3,9 +3,10 @@
 from .boundary import LinkerBoundary, MemoryCommandJournal
 from .config import Credentials, DiscoveryConfig, LinkerConfig
 from .driver import ConnectionSupervisor, VendorRgbDriver
-from .endpoint import JsonLineEndpoint
 from .models import DeviceDescriptor, DriverHealth, LightState, Rgb
 from .protocol import Envelope, ProtocolError
+from .runtime_config import RuntimeConfig, RuntimeConfigError
+from .server_client import LinkerServerClient
 from .tuya import (
     TuyaConfigurationError,
     TuyaDeviceConfig,
@@ -28,9 +29,11 @@ __all__ = [
     "LinkerConfig",
     "LightState",
     "MemoryCommandJournal",
-    "JsonLineEndpoint",
     "ProtocolError",
     "Rgb",
+    "RuntimeConfig",
+    "RuntimeConfigError",
+    "LinkerServerClient",
     "VendorRgbDriver",
     "TuyaConfigurationError",
     "TuyaDeviceConfig",

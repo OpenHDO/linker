@@ -4,11 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openhdo-linker"
-version = "0.2.0"
+version = "0.3.0"
 description = "OpenHDO hardware-access boundary and native local Tuya-compatible driver"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
-dependencies = ["cryptography>=42,<48"]
+dependencies = ["cryptography>=42,<48", "websockets>=13,<17"]
+
+[project.scripts]
+openhdo-linker = "openhdo_linker.cli:main"
+
+[project.optional-dependencies]
+test = ["jsonschema>=4.21,<5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

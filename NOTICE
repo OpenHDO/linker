@@ -5,6 +5,9 @@ This project uses the cryptography package at runtime. cryptography is
 available under the Apache License 2.0 or BSD 3-Clause license:
 https://github.com/pyca/cryptography/blob/main/LICENSE
 
+The WebSocket client uses websockets, available under the BSD 3-Clause
+license: https://github.com/python-websockets/websockets/blob/main/LICENSE
+
 The local Tuya-compatible wire implementation is an independent
 implementation based on publicly documented protocol behavior and
 interoperability research. Protocol ideas were cross-checked against
