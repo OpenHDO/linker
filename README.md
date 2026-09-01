@@ -69,11 +69,12 @@ $env:OPENHDO_TUYA_LOCAL_KEY = '<actual 16 ASCII-byte local key>'
 openhdo-linker inspect `
   --ip '<actual private or link-local IP>' `
   --device-id '<actual device ID>' `
-  --local-key $env:OPENHDO_TUYA_LOCAL_KEY `
   --protocol-version '<3.1|3.2|3.3|3.4>' `
   --timeout 3
 ```
 
+`--local-key` is still available as an explicit automation override, but it
+puts the secret in process arguments; prefer the environment variable above.
 `inspect` performs only a TCP connection and encrypted DP/status query; it
 does not send control. Its sanitized JSON helps determine the DP mapping for
 the linker configuration. Vendor details found locally by `inspect` never

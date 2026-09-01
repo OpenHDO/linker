@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 import json
 import logging
+import os
 import signal
 import sys
 
@@ -25,10 +26,17 @@ def _parser() -> argparse.ArgumentParser:
     inspect = commands.add_parser("inspect", help="read DP indexes, types, and values from one real local device")
     inspect.add_argument("--ip", required=True, help="actual private or link-local device IP")
     inspect.add_argument("--device-id", required=True, help="actual device ID")
-    inspect.add_argument("--local-key", required=True, help="actual 16 ASCII-byte local key")
+    inspect.add_argument("--local-key", help="automation override for the local key; prefer OPENHDO_TUYA_LOCAL_KEY")
     inspect.add_argument("--protocol-version", required=True, choices=SUPPORTED_PROTOCOLS)
     inspect.add_argument("--timeout", type=float, default=3.0, help="TCP/query timeout in seconds (0 < timeout <= 60)")
     return parser
+
+
+def _resolve_inspect_local_key(explicit: str | None, environ: Mapping[str, str] | None = None) -> str:
+    key = explicit if explicit is not None else (os.environ if environ is None else environ).get("OPENHDO_TUYA_LOCAL_KEY")
+    if not key:
+        raise RuntimeConfigError("inspect requires a non-empty --local-key or OPENHDO_TUYA_LOCAL_KEY")
+    return key
 
 
 def _value_type(value: object) -> str:
@@ -78,10 +86,11 @@ def _inspection_payload(ip: str, device_id: str, protocol_version: str, dps: Map
 
 
 async def _inspect(args: argparse.Namespace) -> int:
+    local_key = _resolve_inspect_local_key(args.local_key)
     device = TuyaDeviceConfig(
         ip=args.ip,
         device_id=args.device_id,
-        local_key=args.local_key,
+        local_key=local_key,
         protocol_version=args.protocol_version,
         timeout_s=args.timeout,
     )
@@ -89,7 +98,7 @@ async def _inspect(args: argparse.Namespace) -> int:
     try:
         await driver.connect()
         dps = await driver.inspect_dps()
-        print(json.dumps(_inspection_payload(args.ip, args.device_id, args.protocol_version, dps, sensitive=(args.local_key,)), sort_keys=True))
+        print(json.dumps(_inspection_payload(args.ip, args.device_id, args.protocol_version, dps, sensitive=(local_key,)), sort_keys=True))
         return 0
     finally:
         await driver.disconnect()

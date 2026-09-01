@@ -25,7 +25,7 @@ from openhdo_linker import (  # noqa: E402
     TuyaDpMapping,
     TuyaLocalDriver,
 )
-from openhdo_linker.cli import _inspection_payload, _parser  # noqa: E402
+from openhdo_linker.cli import _inspection_payload, _parser, _resolve_inspect_local_key  # noqa: E402
 
 
 def env(**overrides: str) -> dict[str, str]:
@@ -52,10 +52,16 @@ class ConfigTests(unittest.TestCase):
     def test_inspect_cli_requires_real_device_inputs(self) -> None:
         args = _parser().parse_args([
             "inspect", "--ip", "192.168.1.20", "--device-id", "tuya-device-1",
-            "--local-key", "0123456789abcdef", "--protocol-version", "3.3",
+            "--protocol-version", "3.3",
         ])
         self.assertEqual(args.command, "inspect")
+        self.assertIsNone(args.local_key)
         self.assertEqual(args.timeout, 3.0)
+        explicit = _parser().parse_args([
+            "inspect", "--ip", "192.168.1.20", "--device-id", "tuya-device-1",
+            "--local-key", "0123456789abcdef", "--protocol-version", "3.3",
+        ])
+        self.assertEqual(explicit.local_key, "0123456789abcdef")
         with self.assertRaises(SystemExit):
             _parser().parse_args(["inspect", "--ip", "192.168.1.20"])
         with self.assertRaises(SystemExit):
@@ -63,6 +69,17 @@ class ConfigTests(unittest.TestCase):
                 "inspect", "--ip", "192.168.1.20", "--device-id", "tuya-device-1",
                 "--local-key", "0123456789abcdef", "--protocol-version", "3.5",
             ])
+
+    def test_inspect_local_key_uses_environment_without_exposing_it(self) -> None:
+        key = _resolve_inspect_local_key(None, {"OPENHDO_TUYA_LOCAL_KEY": "0123456789abcdef"})
+        self.assertEqual(key, "0123456789abcdef")
+        self.assertEqual(
+            _resolve_inspect_local_key("fedcba9876543210", {"OPENHDO_TUYA_LOCAL_KEY": "0123456789abcdef"}),
+            "fedcba9876543210",
+        )
+        for value in (None, ""):
+            with self.assertRaisesRegex(RuntimeConfigError, "non-empty"):
+                _resolve_inspect_local_key(None, {"OPENHDO_TUYA_LOCAL_KEY": value} if value is not None else {})
 
     def test_inspect_device_config_rejects_loopback_and_invalid_timeout(self) -> None:
         common = {
