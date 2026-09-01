@@ -184,7 +184,7 @@ class TuyaDeviceConfig:
     device_id: str
     local_key: str = field(repr=False)
     protocol_version: str
-    dps: TuyaDpMapping
+    dps: TuyaDpMapping | None = None
     public_name: str = "LED lamp"
     port: int = TCP_PORT
     timeout_s: float = 3.0
@@ -195,8 +195,8 @@ class TuyaDeviceConfig:
             address = ipaddress.ip_address(self.ip)
         except ValueError as error:
             raise TuyaConfigurationError("ip must be a valid IPv4 or IPv6 address") from error
-        if not address.is_private and not address.is_loopback and not address.is_link_local:
-            raise TuyaConfigurationError("local Tuya device IP must be private, loopback, or link-local")
+        if address.is_loopback or (not address.is_private and not address.is_link_local):
+            raise TuyaConfigurationError("local Tuya device IP must be private or link-local")
         if not self.device_id or len(self.device_id) > 64:
             raise TuyaConfigurationError("device_id is required and must be at most 64 characters")
         if not self.public_name or len(self.public_name) > 128:
@@ -433,7 +433,7 @@ class TuyaLocalDriver(VendorRgbDriver):
     def _descriptor(self, device_id: str) -> DeviceDescriptor:
         if self._device is None:
             return DeviceDescriptor(device_id, "LED lamp")
-        color_modes = ("RGBW",) if self.device.dps.white is not None else ("RGB",)
+        color_modes = ("RGBW",) if self.device.dps is not None and self.device.dps.white is not None else ("RGB",)
         return DeviceDescriptor(device_id, self.device.public_name, color_modes)
 
     def _discover_sync(self, timeout_s: float) -> list[dict[str, str]]:
@@ -499,16 +499,32 @@ class TuyaLocalDriver(VendorRgbDriver):
 
     async def poll_state(self, device_id: str) -> LightState:
         self._check_device(device_id)
+        mapping = self._mapping()
         body: Mapping[str, object] = {}
         if self.device.protocol_version != "3.4":
-            body = {"dps": {str(index): None for index in (self.device.dps.power, self.device.dps.brightness, self.device.dps.color)}}
+            body = {"dps": {str(index): None for index in (mapping.power, mapping.brightness, mapping.color)}}
         payload = await self._exchange(COMMAND_DP_QUERY_NEW if self.device.protocol_version == "3.4" else COMMAND_DP_QUERY, body)
         self._raw_dps = parse_dps(payload)
         state = self._revisioned(
-            state_from_dps(self.device.device_id, self._raw_dps, self.device.dps, observed_at=datetime.now(timezone.utc))
+            state_from_dps(self.device.device_id, self._raw_dps, mapping, observed_at=datetime.now(timezone.utc))
         )
         self._state = state
         return state
+
+    async def inspect_dps(self) -> dict[int, object]:
+        """Read all reported DPs without applying a model mapping or control."""
+
+        body: Mapping[str, object] = {}
+        if self.device.protocol_version != "3.4":
+            body = {
+                "devId": self.device.device_id,
+                "uid": self.device.device_id,
+                "t": int(time.time()),
+                "dps": {},
+            }
+        payload = await self._exchange(COMMAND_DP_QUERY_NEW if self.device.protocol_version == "3.4" else COMMAND_DP_QUERY, body)
+        self._raw_dps = parse_dps(payload)
+        return dict(self._raw_dps)
 
     def descriptor(self, light_id: str | None = None) -> DeviceDescriptor:
         """Return the abstract capability descriptor for the configured device."""
@@ -533,35 +549,45 @@ class TuyaLocalDriver(VendorRgbDriver):
 
     async def turn_on(self, device_id: str, rgb: Rgb | None, brightness: int | None, white: int | None, command_id: UUID) -> LightState:
         self._check_device(device_id)
-        values: dict[int, object] = {self.device.dps.power: True}
+        mapping = self._mapping()
+        values: dict[int, object] = {mapping.power: True}
         if rgb is not None:
-            values[self.device.dps.color] = self.device.dps.encode_color(rgb)
+            values[mapping.color] = mapping.encode_color(rgb)
         if brightness is not None:
-            values[self.device.dps.brightness] = self.device.dps.brightness_to_dp(brightness)
+            values[mapping.brightness] = mapping.brightness_to_dp(brightness)
         if white is not None:
-            values[self._white_dp()] = self.device.dps.white_to_dp(white)
+            values[self._white_dp()] = mapping.white_to_dp(white)
         return await self._set_values(values)
 
     async def turn_off(self, device_id: str, command_id: UUID) -> LightState:
         self._check_device(device_id)
-        return await self._set_values({self.device.dps.power: False})
+        return await self._set_values({self._mapping().power: False})
 
     async def set_brightness(self, device_id: str, brightness: int, command_id: UUID) -> LightState:
         self._check_device(device_id)
-        return await self._set_values({self.device.dps.brightness: self.device.dps.brightness_to_dp(brightness)})
+        mapping = self._mapping()
+        return await self._set_values({mapping.brightness: mapping.brightness_to_dp(brightness)})
 
     async def set_rgb(self, device_id: str, rgb: Rgb, command_id: UUID) -> LightState:
         self._check_device(device_id)
-        return await self._set_values({self.device.dps.color: self.device.dps.encode_color(rgb)})
+        mapping = self._mapping()
+        return await self._set_values({mapping.color: mapping.encode_color(rgb)})
 
     async def set_white(self, device_id: str, white: int, command_id: UUID) -> LightState:
         self._check_device(device_id)
-        return await self._set_values({self._white_dp(): self.device.dps.white_to_dp(white)})
+        mapping = self._mapping()
+        return await self._set_values({self._white_dp(): mapping.white_to_dp(white)})
+
+    def _mapping(self) -> TuyaDpMapping:
+        if self.device.dps is None:
+            raise TuyaConfigurationError("DP mapping is required for state mapping and control")
+        return self.device.dps
 
     def _white_dp(self) -> int:
-        if self.device.dps.white is None:
+        mapping = self._mapping()
+        if mapping.white is None:
             raise TuyaConfigurationError("white channel is not configured for this device")
-        return self.device.dps.white
+        return mapping.white
 
     async def _set_values(self, values: Mapping[int, object]) -> LightState:
         body: Mapping[str, object]
@@ -665,6 +691,12 @@ class TuyaLocalDriver(VendorRgbDriver):
         payload = _without_retcode(
             decode_payload(frame, protocol_version=self.device.protocol_version, key=self.device.key_bytes, session_key=self._session_key)
         )
+        if self.device.dps is None:
+            try:
+                self._raw_dps.update(parse_dps(payload))
+            except TuyaProtocolError:
+                return
+            return
         try:
             self._raw_dps.update(parse_dps(payload))
             state = self._revisioned(

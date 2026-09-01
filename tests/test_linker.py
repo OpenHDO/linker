@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import json
 import sys
 from pathlib import Path
 import unittest
@@ -24,6 +25,7 @@ from openhdo_linker import (  # noqa: E402
     TuyaDpMapping,
     TuyaLocalDriver,
 )
+from openhdo_linker.cli import _inspection_payload, _parser  # noqa: E402
 
 
 def env(**overrides: str) -> dict[str, str]:
@@ -47,6 +49,45 @@ def env(**overrides: str) -> dict[str, str]:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_inspect_cli_requires_real_device_inputs(self) -> None:
+        args = _parser().parse_args([
+            "inspect", "--ip", "192.168.1.20", "--device-id", "tuya-device-1",
+            "--local-key", "0123456789abcdef", "--protocol-version", "3.3",
+        ])
+        self.assertEqual(args.command, "inspect")
+        self.assertEqual(args.timeout, 3.0)
+        with self.assertRaises(SystemExit):
+            _parser().parse_args(["inspect", "--ip", "192.168.1.20"])
+        with self.assertRaises(SystemExit):
+            _parser().parse_args([
+                "inspect", "--ip", "192.168.1.20", "--device-id", "tuya-device-1",
+                "--local-key", "0123456789abcdef", "--protocol-version", "3.5",
+            ])
+
+    def test_inspect_device_config_rejects_loopback_and_invalid_timeout(self) -> None:
+        common = {
+            "device_id": "tuya-device-1",
+            "local_key": "0123456789abcdef",
+            "protocol_version": "3.3",
+            "dps": None,
+        }
+        with self.assertRaises(TuyaConfigurationError):
+            TuyaDeviceConfig(ip="127.0.0.1", **common)
+        with self.assertRaises(TuyaConfigurationError):
+            TuyaDeviceConfig(ip="192.168.1.20", timeout_s=0, **common)
+
+    def test_inspect_output_redacts_credentials_and_reports_dp_types(self) -> None:
+        payload = _inspection_payload(
+            "192.168.1.20", "tuya-device-1", "3.3",
+            {2: 42, 1: True, 3: {"local_key": "0123456789abcdef", "value": "prefix-server-secret-suffix"}},
+            sensitive=("0123456789abcdef", "server-secret"),
+        )
+        rendered = json.dumps(payload)
+        self.assertNotIn("0123456789abcdef", rendered)
+        self.assertNotIn("server-secret", rendered)
+        self.assertEqual(payload["dps"][0], {"index": 1, "type": "bool", "value": True})
+        self.assertEqual(payload["dps"][1], {"index": 2, "type": "int", "value": 42})
+
     def test_env_builds_real_device_config_and_exact_websocket_path(self) -> None:
         config = RuntimeConfig.from_env(environ=env())
         self.assertEqual(config.websocket_url, "ws://127.0.0.1:8000/api/v1/linkers/openhdo.linker.rgb")

@@ -61,6 +61,25 @@ descriptors with `light`, `rgb`, `brightness`, and brightness range `0..255`;
 an explicitly configured white DP adds abstract `white` and its `0..255`
 range.
 
+To inspect the actual DPs before choosing a mapping, query the real device:
+
+```powershell
+py -m pip install -e .
+$env:OPENHDO_TUYA_LOCAL_KEY = '<actual 16 ASCII-byte local key>'
+openhdo-linker inspect `
+  --ip '<actual private or link-local IP>' `
+  --device-id '<actual device ID>' `
+  --local-key $env:OPENHDO_TUYA_LOCAL_KEY `
+  --protocol-version '<3.1|3.2|3.3|3.4>' `
+  --timeout 3
+```
+
+`inspect` performs only a TCP connection and encrypted DP/status query; it
+does not send control. Its sanitized JSON helps determine the DP mapping for
+the linker configuration. Vendor details found locally by `inspect` never
+enter the public OpenHDO server boundary, which receives only abstract light
+descriptors and states.
+
 Install the runtime and run the read-only smoke command against a real device
 (replace every angle-bracket value with an actual value):
 
