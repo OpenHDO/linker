@@ -1,0 +1,15 @@
+OpenHDO Linker
+Copyright (c) OpenHDO contributors
+
+This project uses the cryptography package at runtime. cryptography is
+available under the Apache License 2.0 or BSD 3-Clause license:
+https://github.com/pyca/cryptography/blob/main/LICENSE
+
+The local Tuya-compatible wire implementation is an independent
+implementation based on publicly documented protocol behavior and
+interoperability research. Protocol ideas were cross-checked against
+TinyTuya, an MIT-licensed project; no TinyTuya source code is copied here:
+https://github.com/jasonacox/tinytuya
+
+This notice records third-party attribution and does not change the
+repository's own licensing terms.

@@ -6,6 +6,16 @@ from .driver import ConnectionSupervisor, VendorRgbDriver
 from .endpoint import JsonLineEndpoint
 from .models import DeviceDescriptor, DriverHealth, LightState, Rgb
 from .protocol import Envelope, ProtocolError
+from .tuya import (
+    TuyaConfigurationError,
+    TuyaDeviceConfig,
+    TuyaDiscoveryOptions,
+    TuyaDpMapping,
+    TuyaLocalDriver,
+    TuyaProtocolError,
+    parse_dps,
+    state_from_dps,
+)
 
 __all__ = [
     "ConnectionSupervisor",
@@ -22,4 +32,12 @@ __all__ = [
     "ProtocolError",
     "Rgb",
     "VendorRgbDriver",
+    "TuyaConfigurationError",
+    "TuyaDeviceConfig",
+    "TuyaDiscoveryOptions",
+    "TuyaDpMapping",
+    "TuyaLocalDriver",
+    "TuyaProtocolError",
+    "parse_dps",
+    "state_from_dps",
 ]

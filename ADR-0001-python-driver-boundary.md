@@ -2,9 +2,10 @@
 
 ## Decision
 
-The first implementation is a dependency-free Python boundary. A concrete
-vendor-specific Wi-Fi adapter is added behind `VendorRgbDriver` only after the
-lamp model and protocol are confirmed.
+The Python boundary remains vendor-neutral, while a concrete native local
+Tuya-compatible Wi-Fi adapter is implemented behind `VendorRgbDriver`. It
+requires operator-supplied device credentials, protocol version, and DP
+mapping; it does not claim that the Sirius LED Smart C37 is Tuya-compatible.
 
 The boundary owns:
 
@@ -19,11 +20,15 @@ The boundary owns:
 
 The concrete adapter owns network I/O, authentication details, protocol
 encoding/decoding, discovery, and vendor-specific retry/acknowledgement rules.
-No unconfirmed device protocol is encoded in the core.
+No vendor-specific data is encoded in the server-facing core. The adapter owns
+local Tuya framing, AES/HMAC transport, optional UDP discovery, and the
+translation from configured DPs to abstract light capabilities, ranges, and
+state. Home Assistant, a gateway, cloud services, and simulated devices are
+out of scope.
 
 ## Consequences
 
-The package can be exercised without network access while keeping the runtime
-boundary identical to the eventual driver. The default journal is process
-local; deployments that need duplicate protection across restarts must inject a
-durable implementation.
+Pure mapping, parsing, and validation tests run without network access. The
+real-device smoke command is intentionally separate and requires all actual
+onboarding inputs. The default journal is process local; deployments that need
+duplicate protection across restarts must inject a durable implementation.

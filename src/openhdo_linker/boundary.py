@@ -84,13 +84,28 @@ class LinkerBoundary:
             device_id = _required_string(command.payload, "device_id")
             action = _required_string(command.payload, "action")
             if action == "light.turn_on":
+                rgb_value = command.payload.get("rgb")
                 state = await self.driver.turn_on(
                     device_id,
-                    Rgb.from_payload(command.payload.get("rgb")),
+                    None if rgb_value is None else Rgb.from_payload(rgb_value),
+                    _optional_brightness(command.payload.get("brightness")),
+                    _optional_brightness(command.payload.get("white")),
                     command.id,
                 )
             elif action == "light.turn_off":
                 state = await self.driver.turn_off(device_id, command.id)
+            elif action == "light.set_brightness":
+                brightness = _optional_brightness(command.payload.get("brightness"))
+                if brightness is None:
+                    raise ValueError("brightness is required")
+                state = await self.driver.set_brightness(device_id, brightness, command.id)
+            elif action == "light.set_rgb":
+                state = await self.driver.set_rgb(device_id, Rgb.from_payload(command.payload.get("rgb")), command.id)
+            elif action == "light.set_white":
+                white = _optional_brightness(command.payload.get("white"))
+                if white is None:
+                    raise ValueError("white is required")
+                state = await self.driver.set_white(device_id, white, command.id)
             else:
                 raise ValueError(f"unsupported action: {action}")
             payload = {"status": "ok", "device_id": device_id, "state": state.to_payload()}
@@ -110,4 +125,12 @@ def _required_string(payload: Mapping[str, object], key: str) -> str:
     value = payload[key]
     if not isinstance(value, str) or not value:
         raise ValueError(f"{key} must be a non-empty string")
+    return value
+
+
+def _optional_brightness(value: object) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or not 0 <= value <= 255:
+        raise ValueError("brightness must be an integer from 0 to 255")
     return value
