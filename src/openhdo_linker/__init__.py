@@ -2,7 +2,7 @@
 
 from .boundary import LinkerBoundary, MemoryCommandJournal
 from .config import Credentials, DiscoveryConfig, LinkerConfig
-from .driver import ConnectionSupervisor, VendorRgbDriver
+from .driver import ConnectionSupervisor, PairingError, VendorRgbDriver
 from .models import DeviceDescriptor, DiscoveryCandidate, DriverHealth, LightState, Rgb
 from .protocol import Envelope, ProtocolError
 from .runtime_config import RuntimeConfig, RuntimeConfigError
@@ -31,6 +31,7 @@ __all__ = [
     "LinkerConfig",
     "LightState",
     "MemoryCommandJournal",
+    "PairingError",
     "ProtocolError",
     "Rgb",
     "RuntimeConfig",

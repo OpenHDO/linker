@@ -19,6 +19,10 @@ StateCallback = Callable[[LightState], Awaitable[None] | None]
 Unsubscribe = Callable[[], Awaitable[None] | None]
 
 
+class PairingError(ValueError):
+    """Safe pairing failure that can be shown to an administrator."""
+
+
 class VendorRgbDriver(Protocol):
     """The only runtime contract a vendor-specific Wi-Fi adapter must provide."""
 

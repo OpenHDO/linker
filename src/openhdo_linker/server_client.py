@@ -26,6 +26,7 @@ class LinkerServerClient:
         self.logger = logger or logging.getLogger(__name__)
         self.last_error: str | None = None
         self._send_lock = asyncio.Lock()
+        self._driver_lock = asyncio.Lock()
 
     async def run(self, stop: asyncio.Event) -> None:
         delay = self.reconnect_initial_s
@@ -71,7 +72,8 @@ class LinkerServerClient:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self.boundary.driver.disconnect()
+            async with self._driver_lock:
+                await self.boundary.driver.disconnect()
 
     async def _receive_loop(self, websocket: Any) -> None:
         async for raw in websocket:
@@ -93,7 +95,8 @@ class LinkerServerClient:
             return
         if message.type == "pairing.start":
             try:
-                messages = await self.boundary.handle_pairing(message)
+                async with self._driver_lock:
+                    messages = await self.boundary.handle_pairing(message)
             except (KeyError, TypeError, ValueError) as error:
                 self.logger.warning("rejected invalid pairing.start: %s", error)
                 return
@@ -124,16 +127,19 @@ class LinkerServerClient:
                 await _wait_or_stop(stop, 0.25)
                 continue
             try:
-                await self.boundary.driver.connect()
-
                 async def publish(state: Any) -> None:
                     await self._send(websocket, self.boundary.state(state))
 
-                unsubscribe = await self.boundary.driver.subscribe_state(self.boundary.device_id, publish)
-                await publish(await self.boundary.driver.poll_state(self.boundary.device_id))
+                async with self._driver_lock:
+                    await self.boundary.driver.connect()
+                    unsubscribe = await self.boundary.driver.subscribe_state(self.boundary.device_id, publish)
+                    state = await self.boundary.driver.poll_state(self.boundary.device_id)
+                await publish(state)
                 delay = self.reconnect_initial_s
                 while not await _wait_or_stop(stop, self.state_poll_interval_s):
-                    await publish(await self.boundary.driver.poll_state(self.boundary.device_id))
+                    async with self._driver_lock:
+                        state = await self.boundary.driver.poll_state(self.boundary.device_id)
+                    await publish(state)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -142,9 +148,11 @@ class LinkerServerClient:
                 delay = min(delay * 2, self.reconnect_max_s)
             finally:
                 if unsubscribe is not None:
-                    await unsubscribe()
+                    async with self._driver_lock:
+                        await unsubscribe()
                     unsubscribe = None
-                await self.boundary.driver.disconnect()
+                async with self._driver_lock:
+                    await self.boundary.driver.disconnect()
             if not await _wait_or_stop(stop, delay):
                 return
 

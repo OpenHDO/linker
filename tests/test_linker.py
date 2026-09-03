@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -20,6 +21,7 @@ from openhdo_linker import (  # noqa: E402
     LightState,
     LinkerBoundary,
     LinkerConfig,
+    PairingError,
     Rgb,
     RuntimeConfig,
     RuntimeConfigError,
@@ -228,6 +230,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNone(config.device)
         self.assertIsNone(config.light_id)
         self.assertIsNotNone(config.pairing)
+        self.assertEqual(config.pairing_state_path, "openhdo-pairing.json")
         self.assertNotIn("0123456789abcdef", repr(config))
 
     def test_server_token_is_optional_locally_but_required_for_non_local_wss(self) -> None:
@@ -488,6 +491,10 @@ class DiscoveryEnvelopeTests(unittest.TestCase):
             boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
             message = (await boundary.handle_pairing(self._pairing_request()))[0]
             self.assertEqual(message.payload["status"], "failed")
+            self.assertEqual(
+                message.payload["error"],
+                "device verification failed; check Linker local key, protocol, and DP mapping",
+            )
             self.assertIsNone(message.payload.get("device"))
             self.assertNotIn("0123456789abcdef", json.dumps(message.to_dict()))
             self.assertNotIn("192.168.1.20", json.dumps(message.to_dict()))
@@ -510,10 +517,52 @@ class DiscoveryEnvelopeTests(unittest.TestCase):
                 descriptor, device_id = await driver.pair(candidate_id)
             self.assertEqual(descriptor.id, candidate_id)
             self.assertEqual(device_id, "tuya-device-1")
-            with self.assertRaises(TuyaConfigurationError):
+            with self.assertRaises(PairingError):
                 await driver.pair("light.not-found")
 
         asyncio.run(check())
+
+    def test_tuya_pairing_binding_survives_driver_restart_without_storing_key(self) -> None:
+        async def check() -> None:
+            mapping = TuyaDpMapping(1, 2, 5, "rgb_hex", 10, 1000)
+            pairing = TuyaPairingConfig("0123456789abcdef", "3.3", mapping)
+            with TemporaryDirectory() as directory:
+                state_path = Path(directory) / "pairing.json"
+                driver = TuyaLocalDriver(
+                    pairing=pairing,
+                    discovery=TuyaDiscoveryOptions(enabled=True),
+                    state_path=state_path,
+                )
+                with patch.object(driver, "_discover_sync", return_value=[{"id": "tuya-device-1", "ip": "192.168.1.20"}]):
+                    candidate_id = (await driver.discover(DiscoveryConfig(timeout_s=1), Credentials()))[0].id
+                with (
+                    patch.object(driver, "connect", new=AsyncMock()),
+                    patch.object(driver, "poll_state", new=AsyncMock(return_value=LightState("tuya-device-1", True, True, Rgb(1, 2, 3), 255))),
+                ):
+                    await driver.pair(candidate_id)
+                saved = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(saved, {"version": 1, "candidate_id": candidate_id, "device_id": "tuya-device-1", "ip": "192.168.1.20"})
+                self.assertNotIn("0123456789abcdef", state_path.read_text(encoding="utf-8"))
+
+                restored = TuyaLocalDriver(pairing=pairing, state_path=state_path)
+                self.assertEqual(restored.paired_light_id, candidate_id)
+                self.assertEqual(restored.device.device_id, "tuya-device-1")
+                self.assertEqual(restored.device.ip, "192.168.1.20")
+
+        asyncio.run(check())
+
+    def test_invalid_tuya_pairing_binding_is_rejected(self) -> None:
+        with TemporaryDirectory() as directory:
+            state_path = Path(directory) / "pairing.json"
+            state_path.write_text(
+                json.dumps({"version": 1, "candidate_id": "light.wrong", "device_id": "tuya-device-1", "ip": "192.168.1.20"}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(TuyaConfigurationError, "pairing state is invalid"):
+                TuyaLocalDriver(
+                    pairing=TuyaPairingConfig("0123456789abcdef", "3.3", TuyaDpMapping(1, 2, 5, "rgb_hex", 10, 1000)),
+                    state_path=state_path,
+                )
 
     def test_server_client_sends_pairing_completion(self) -> None:
         async def check() -> None:

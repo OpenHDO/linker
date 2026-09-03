@@ -22,8 +22,10 @@ import re
 import select
 import socket
 import struct
+import tempfile
 import time
 from uuid import UUID
+from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -31,7 +33,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import padding
 
 from .config import Credentials, DiscoveryConfig
-from .driver import StateCallback, Unsubscribe, VendorRgbDriver
+from .driver import PairingError, StateCallback, Unsubscribe, VendorRgbDriver
 from .models import DeviceDescriptor, DriverHealth, LightState, Rgb
 
 PREFIX = 0x000055AA
@@ -511,9 +513,12 @@ class TuyaLocalDriver(VendorRgbDriver):
         device: TuyaDeviceConfig | None = None,
         discovery: TuyaDiscoveryOptions | None = None,
         pairing: TuyaPairingConfig | None = None,
+        state_path: str | os.PathLike[str] | None = None,
     ) -> None:
         self._device = device
         self._pairing = pairing
+        self._state_path = Path(state_path) if state_path is not None else None
+        self._paired_light_id: str | None = None
         self.discovery_options = discovery or TuyaDiscoveryOptions()
         self._discovered: dict[str, dict[str, str]] = {}
         self._reader: asyncio.StreamReader | None = None
@@ -528,6 +533,8 @@ class TuyaLocalDriver(VendorRgbDriver):
         self._state: LightState | None = None
         self._last_error: str | None = None
         self._connected_at: datetime | None = None
+        if device is None and pairing is not None and self._state_path is not None:
+            self._load_pairing_state()
 
     async def discover(self, config: DiscoveryConfig, credentials: Credentials) -> Sequence[DeviceDescriptor]:
         self._discovered.clear()
@@ -546,12 +553,11 @@ class TuyaLocalDriver(VendorRgbDriver):
 
         item = self._discovered.get(candidate_id)
         if item is None:
-            raise TuyaConfigurationError("candidate was not found by the latest LAN discovery")
+            raise PairingError("candidate expired; run Find again")
         if self._pairing is None:
-            raise TuyaConfigurationError(
-                "pairing requires local_key, protocol, and verified DP mapping in Linker configuration"
-            )
+            raise PairingError("pairing profile is missing; configure Linker local key and verified DP mapping")
         previous_device = self._device
+        previous_light_id = self._paired_light_id
         device = TuyaDeviceConfig(
             ip=item["ip"],
             device_id=item["id"],
@@ -569,12 +575,84 @@ class TuyaLocalDriver(VendorRgbDriver):
         try:
             await self.connect()
             await self.poll_state(device.device_id)
+            self._save_pairing_state(candidate_id, device)
+            callbacks = self._callbacks.pop(previous_device.device_id, None) if previous_device is not None else None
+            if callbacks:
+                self._callbacks[device.device_id] = callbacks
+            self._paired_light_id = candidate_id
         except BaseException:
             await self.disconnect()
             self._device = previous_device
+            self._paired_light_id = previous_light_id
             self._state = None
             raise
         return self.descriptor(candidate_id), device.device_id
+
+    @property
+    def paired_light_id(self) -> str | None:
+        return self._paired_light_id
+
+    def _load_pairing_state(self) -> None:
+        assert self._state_path is not None
+        try:
+            with self._state_path.open(encoding="utf-8") as stream:
+                payload = json.load(stream)
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                raise ValueError
+            candidate_id = payload.get("candidate_id")
+            device_id = payload.get("device_id")
+            ip = payload.get("ip")
+            if (
+                not isinstance(candidate_id, str)
+                or not isinstance(device_id, str)
+                or not isinstance(ip, str)
+                or candidate_id != self._candidate_id(device_id)
+            ):
+                raise ValueError
+            self._device = TuyaDeviceConfig(
+                ip=ip,
+                device_id=device_id,
+                local_key=self._pairing.local_key,
+                protocol_version=self._pairing.protocol_version,
+                dps=self._pairing.dps,
+                public_name=self._pairing.public_name,
+                port=self._pairing.port,
+                timeout_s=self._pairing.timeout_s,
+                retries=self._pairing.retries,
+            )
+            self._paired_light_id = candidate_id
+        except FileNotFoundError:
+            return
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise TuyaConfigurationError("pairing state is invalid") from error
+
+    def _save_pairing_state(self, candidate_id: str, device: TuyaDeviceConfig) -> None:
+        if self._state_path is None:
+            return
+        if candidate_id != self._candidate_id(device.device_id):
+            raise TuyaConfigurationError("pairing state candidate does not match device")
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=self._state_path.parent, prefix=f".{self._state_path.name}.", delete=False
+            ) as stream:
+                temporary_path = stream.name
+                json.dump(
+                    {"version": 1, "candidate_id": candidate_id, "device_id": device.device_id, "ip": device.ip},
+                    stream,
+                    separators=(",", ":"),
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, self._state_path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
 
     @property
     def device(self) -> TuyaDeviceConfig:

@@ -26,13 +26,14 @@ class RuntimeConfig:
     server_url: str
     linker: LinkerConfig
     device: TuyaDeviceConfig | None = field(default=None, repr=False)
-    pairing: TuyaPairingConfig | None = field(default=None, repr=False)
     light_id: str | None = None
     state_poll_interval_s: float = 15.0
     server_open_timeout_s: float = 10.0
     server_api_token: str | None = field(default=None, repr=False)
     discovery_only: bool = False
     discovery_enabled: bool = False
+    pairing: TuyaPairingConfig | None = field(default=None, repr=False)
+    pairing_state_path: str = "openhdo-pairing.json"
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.server_url)
@@ -40,6 +41,8 @@ class RuntimeConfig:
             raise RuntimeConfigError("server must be a ws:// or wss:// URL with a host")
         if self.server_api_token is not None and not self.server_api_token.strip():
             raise RuntimeConfigError("server_api_token must not be empty")
+        if not self.pairing_state_path.strip():
+            raise RuntimeConfigError("pairing_state_path must not be empty")
         if not _is_local_host(parsed.hostname) and (parsed.scheme != "wss" or self.server_api_token is None):
             raise RuntimeConfigError("non-local servers require wss:// and OPENHDO_SERVER_TOKEN")
         if self.discovery_only:
@@ -97,6 +100,9 @@ class RuntimeConfig:
                 server_url=server,
                 linker=linker,
                 pairing=_pairing_config(env, tuya_raw),
+                pairing_state_path=_string(
+                    env, "OPENHDO_TUYA_PAIRING_STATE", tuya_raw, "pairing_state", default="openhdo-pairing.json"
+                ) or "openhdo-pairing.json",
                 discovery_only=True,
                 discovery_enabled=discovery_enabled,
                 state_poll_interval_s=float(_value(env, "OPENHDO_STATE_POLL_INTERVAL", raw, "state_poll_interval_s", default=15.0)),
@@ -131,6 +137,9 @@ class RuntimeConfig:
             state_poll_interval_s=float(_value(env, "OPENHDO_STATE_POLL_INTERVAL", raw, "state_poll_interval_s", default=15.0)),
             server_open_timeout_s=float(_value(env, "OPENHDO_SERVER_OPEN_TIMEOUT", raw, "server_open_timeout_s", default=10.0)),
             server_api_token=server_api_token,
+            pairing_state_path=_string(
+                env, "OPENHDO_TUYA_PAIRING_STATE", tuya_raw, "pairing_state", default="openhdo-pairing.json"
+            ) or "openhdo-pairing.json",
         )
 
 

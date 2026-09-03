@@ -9,7 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 from .config import Credentials, LinkerConfig
-from .driver import VendorRgbDriver
+from .driver import PairingError, VendorRgbDriver
 from .models import DeviceDescriptor, DiscoveryCandidate, LightState, Rgb
 from .protocol import Envelope
 
@@ -122,7 +122,7 @@ class LinkerBoundary:
         pair = getattr(self.driver, "pair", None)
         try:
             if not callable(pair):
-                raise ValueError("driver does not support pairing")
+                raise PairingError("this Linker does not support pairing")
             descriptor, device_id = await asyncio.wait_for(
                 pair(candidate_id), timeout=max(0.5, timeout_s - PAIRING_PROTOCOL_MARGIN_S)
             )
@@ -137,9 +137,19 @@ class LinkerBoundary:
             raise
         except TimeoutError:
             return (self._pairing_completed(start, session_id, candidate_id, "failed", "pairing timed out"),)
+        except PairingError as error:
+            return (self._pairing_completed(start, session_id, candidate_id, "failed", str(error)),)
         except Exception:
             # Pairing errors may contain device addresses or local credentials.
-            return (self._pairing_completed(start, session_id, candidate_id, "failed", "pairing failed"),)
+            return (
+                self._pairing_completed(
+                    start,
+                    session_id,
+                    candidate_id,
+                    "failed",
+                    "device verification failed; check Linker local key, protocol, and DP mapping",
+                ),
+            )
         return (self._pairing_completed(start, session_id, candidate_id, "completed", None),)
 
     def _discovery_completed(

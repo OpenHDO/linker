@@ -94,8 +94,13 @@ flow: both come from the latest validated LAN discovery. The Linker connects
 and reads the configured DPs before sending `pairing.completed`; a failed
 connection never creates a server device. The key and mapping stay inside the
 Linker, and the server receives only the abstract device manifest. Without a
-local pairing profile, `pairing.start` fails explicitly and no device is
-registered.
+local pairing profile, `pairing.start` reports that the profile is missing and
+no device is registered. After a successful pairing,
+`OPENHDO_TUYA_PAIRING_STATE` (or `tuya.pairing_state` in the JSON config)
+stores only the opaque candidate id, real device id, and LAN IP. It is written
+atomically after verification, so a Linker restart restores the binding without
+putting the local key in the state file. The default path is
+`openhdo-pairing.json` relative to the Linker working directory.
 
 This still is not EZ mode or AP mode Wi-Fi provisioning, cloud onboarding, or
 local-key recovery. Smart Life/Tuya must perform Wi-Fi onboarding and provide
