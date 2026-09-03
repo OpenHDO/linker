@@ -86,9 +86,21 @@ The long-running process can run without a configured device in discovery-only
 mode. `OPENHDO_DISCOVERY_ONLY=true` requires only `OPENHDO_SERVER` (and linker
 identity overrides if needed), registers an identity with no `devices`, stays
 connected, and answers `discovery.start`. This mode enables LAN discovery by
-default; set `OPENHDO_TUYA_DISCOVERY_ENABLED=false` to disable scans. Normal
-control mode still requires the complete real-device and DP mapping listed
-above. Discovery-only mode does not add EZ/AP provisioning or pairing.
+default; set `OPENHDO_TUYA_DISCOVERY_ENABLED=false` to disable scans. After the
+device has been onboarded in Smart Life/Tuya, discovery-only mode can also
+pair it when the Linker has the local key, protocol version, and verified DP
+mapping in its environment/config. Do not set an IP or device ID for this
+flow: both come from the latest validated LAN discovery. The Linker connects
+and reads the configured DPs before sending `pairing.completed`; a failed
+connection never creates a server device. The key and mapping stay inside the
+Linker, and the server receives only the abstract device manifest. Without a
+local pairing profile, `pairing.start` fails explicitly and no device is
+registered.
+
+This still is not EZ mode or AP mode Wi-Fi provisioning, cloud onboarding, or
+local-key recovery. Smart Life/Tuya must perform Wi-Fi onboarding and provide
+the local key through an approved path; the Linker only verifies and controls
+the already-onboarded device on the LAN.
 
 To inspect the actual DPs before choosing a mapping, query the real device:
 
@@ -158,10 +170,10 @@ zero-length scan.
 ## Run the Linker process
 
 The process connects to the Python server runtime at
-`ws://<server>/api/v1/linkers/<linker_id>`, registers one abstract LED Light,
-publishes `light.state.reported`, receives the v1 `light.command.*` messages,
-and sends `command.result` only after the real device action is confirmed by a
-read-after-write poll. Server-facing messages follow
+`ws://<server>/api/v1/linkers/<linker_id>`, registers an abstract Linker,
+publishes `light.state.reported` after pairing/control is enabled, receives the
+v1 `light.command.*` messages, and sends `command.result` only after the real
+device action is confirmed by a read-after-write poll. Server-facing messages follow
 [`server/contracts/v1`](https://github.com/OpenHDO/server/tree/master/contracts/v1).
 
 Configuration may come from JSON with environment-variable overrides. For a

@@ -231,6 +231,37 @@ class TuyaDeviceConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TuyaPairingConfig:
+    """Local credentials and verified mapping used after LAN discovery."""
+
+    local_key: str = field(repr=False)
+    protocol_version: str
+    dps: TuyaDpMapping
+    public_name: str = "LED lamp"
+    port: int = TCP_PORT
+    timeout_s: float = 3.0
+    retries: int = 1
+
+    def __post_init__(self) -> None:
+        try:
+            self.local_key.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise TuyaConfigurationError("local_key must contain ASCII characters") from error
+        if len(self.local_key.encode("ascii")) != 16:
+            raise TuyaConfigurationError("local_key must be exactly 16 ASCII bytes")
+        if self.protocol_version not in SUPPORTED_PROTOCOLS:
+            supported = ", ".join(SUPPORTED_PROTOCOLS)
+            raise TuyaConfigurationError(f"protocol_version must be one of {supported}; 3.5 is not implemented")
+        if not self.public_name or len(self.public_name) > 128:
+            raise TuyaConfigurationError("public_name must contain 1 to 128 characters")
+        _bounded_int("port", self.port, 1, 65535)
+        if self.timeout_s <= 0 or self.timeout_s > 60:
+            raise TuyaConfigurationError("timeout_s must be greater than 0 and at most 60")
+        if type(self.retries) is not int or not 0 <= self.retries <= 5:
+            raise TuyaConfigurationError("retries must be an integer from 0 to 5")
+
+
+@dataclass(frozen=True, slots=True)
 class TuyaDiscoveryOptions:
     """Safe, opt-in UDP discovery settings."""
 
@@ -475,9 +506,16 @@ class _Pending:
 class TuyaLocalDriver(VendorRgbDriver):
     """A single-device native local Tuya TCP adapter."""
 
-    def __init__(self, device: TuyaDeviceConfig | None = None, discovery: TuyaDiscoveryOptions | None = None) -> None:
+    def __init__(
+        self,
+        device: TuyaDeviceConfig | None = None,
+        discovery: TuyaDiscoveryOptions | None = None,
+        pairing: TuyaPairingConfig | None = None,
+    ) -> None:
         self._device = device
+        self._pairing = pairing
         self.discovery_options = discovery or TuyaDiscoveryOptions()
+        self._discovered: dict[str, dict[str, str]] = {}
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
@@ -492,10 +530,51 @@ class TuyaLocalDriver(VendorRgbDriver):
         self._connected_at: datetime | None = None
 
     async def discover(self, config: DiscoveryConfig, credentials: Credentials) -> Sequence[DeviceDescriptor]:
+        self._discovered.clear()
         if not self.discovery_options.enabled:
             return ()
         found = await asyncio.to_thread(self._discover_sync, config.timeout_s)
-        return tuple(self._discovery_descriptor(item["id"]) for item in found)
+        descriptors = []
+        for item in found:
+            candidate_id = self._candidate_id(item["id"])
+            self._discovered[candidate_id] = item
+            descriptors.append(self._discovery_descriptor(item["id"]))
+        return tuple(descriptors)
+
+    async def pair(self, candidate_id: str) -> tuple[DeviceDescriptor, str]:
+        """Connect to a candidate found by the latest real discovery scan."""
+
+        item = self._discovered.get(candidate_id)
+        if item is None:
+            raise TuyaConfigurationError("candidate was not found by the latest LAN discovery")
+        if self._pairing is None:
+            raise TuyaConfigurationError(
+                "pairing requires local_key, protocol, and verified DP mapping in Linker configuration"
+            )
+        previous_device = self._device
+        device = TuyaDeviceConfig(
+            ip=item["ip"],
+            device_id=item["id"],
+            local_key=self._pairing.local_key,
+            protocol_version=self._pairing.protocol_version,
+            dps=self._pairing.dps,
+            public_name=self._pairing.public_name,
+            port=self._pairing.port,
+            timeout_s=self._pairing.timeout_s,
+            retries=self._pairing.retries,
+        )
+        await self.disconnect()
+        self._device = device
+        self._state = None
+        try:
+            await self.connect()
+            await self.poll_state(device.device_id)
+        except BaseException:
+            await self.disconnect()
+            self._device = previous_device
+            self._state = None
+            raise
+        return self.descriptor(candidate_id), device.device_id
 
     @property
     def device(self) -> TuyaDeviceConfig:
@@ -514,8 +593,11 @@ class TuyaLocalDriver(VendorRgbDriver):
     @staticmethod
     def _discovery_descriptor(device_id: str) -> DeviceDescriptor:
         # The real Tuya ID remains linker-local; the server receives a stable opaque identifier.
-        candidate_id = f"light.{hashlib.sha256(device_id.encode('utf-8')).hexdigest()[:32]}"
-        return DeviceDescriptor(candidate_id, "LED lamp")
+        return DeviceDescriptor(TuyaLocalDriver._candidate_id(device_id), "LED lamp")
+
+    @staticmethod
+    def _candidate_id(device_id: str) -> str:
+        return f"light.{hashlib.sha256(device_id.encode('utf-8')).hexdigest()[:32]}"
 
     def _discover_sync(self, timeout_s: float) -> list[dict[str, str]]:
         sockets: list[socket.socket] = []

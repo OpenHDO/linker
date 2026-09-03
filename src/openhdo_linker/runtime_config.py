@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from urllib.parse import quote, urlparse
 
 from .config import DiscoveryConfig, LinkerConfig
-from .tuya import TuyaDeviceConfig, TuyaDpMapping
+from .tuya import TuyaDeviceConfig, TuyaDpMapping, TuyaPairingConfig
 
 _LIGHT_ID = re.compile(r"^[a-z][a-z0-9._-]{1,63}$")
 
@@ -26,6 +26,7 @@ class RuntimeConfig:
     server_url: str
     linker: LinkerConfig
     device: TuyaDeviceConfig | None = field(default=None, repr=False)
+    pairing: TuyaPairingConfig | None = field(default=None, repr=False)
     light_id: str | None = None
     state_poll_interval_s: float = 15.0
     server_open_timeout_s: float = 10.0
@@ -95,6 +96,7 @@ class RuntimeConfig:
             return cls(
                 server_url=server,
                 linker=linker,
+                pairing=_pairing_config(env, tuya_raw),
                 discovery_only=True,
                 discovery_enabled=discovery_enabled,
                 state_poll_interval_s=float(_value(env, "OPENHDO_STATE_POLL_INTERVAL", raw, "state_poll_interval_s", default=15.0)),
@@ -108,26 +110,7 @@ class RuntimeConfig:
         if not isinstance(light_id, str):
             raise RuntimeConfigError("light_id must be a string")
 
-        def number(env_name: str, key: str, *, required: bool = False, default: int | None = None) -> int | None:
-            value = _value(env, env_name, tuya_raw, key, required=required, default=default)
-            if value is None:
-                return None
-            try:
-                return int(value)
-            except (TypeError, ValueError) as error:
-                raise RuntimeConfigError(f"{key} must be an integer") from error
-
-        mapping = TuyaDpMapping(
-            power=number("OPENHDO_TUYA_DP_POWER", "dp_power", required=True),
-            brightness=number("OPENHDO_TUYA_DP_BRIGHTNESS", "dp_brightness", required=True),
-            color=number("OPENHDO_TUYA_DP_COLOR", "dp_color", required=True),
-            color_format=_string(env, "OPENHDO_TUYA_COLOR_FORMAT", tuya_raw, "color_format", required=True),
-            brightness_min=number("OPENHDO_TUYA_BRIGHTNESS_MIN", "brightness_min", required=True),
-            brightness_max=number("OPENHDO_TUYA_BRIGHTNESS_MAX", "brightness_max", required=True),
-            white=number("OPENHDO_TUYA_DP_WHITE", "dp_white"),
-            white_min=number("OPENHDO_TUYA_WHITE_MIN", "white_min"),
-            white_max=number("OPENHDO_TUYA_WHITE_MAX", "white_max"),
-        )
+        mapping = _tuya_mapping(env, tuya_raw)
         device = TuyaDeviceConfig(
             ip=_string(env, "OPENHDO_TUYA_IP", tuya_raw, "ip", required=True),
             device_id=device_id,
@@ -135,9 +118,9 @@ class RuntimeConfig:
             protocol_version=_string(env, "OPENHDO_TUYA_PROTOCOL", tuya_raw, "protocol", required=True),
             dps=mapping,
             public_name=_string(env, "OPENHDO_TUYA_PUBLIC_NAME", tuya_raw, "public_name", default="LED lamp"),
-            port=number("OPENHDO_TUYA_PORT", "port", default=6668),
+            port=_tuya_number(env, tuya_raw, "OPENHDO_TUYA_PORT", "port", default=6668),
             timeout_s=float(_value(env, "OPENHDO_TUYA_TIMEOUT", tuya_raw, "timeout", default=3.0)),
-            retries=number("OPENHDO_TUYA_RETRIES", "retries", default=1),
+            retries=_tuya_number(env, tuya_raw, "OPENHDO_TUYA_RETRIES", "retries", default=1),
         )
         return cls(
             server_url=server,
@@ -149,6 +132,55 @@ class RuntimeConfig:
             server_open_timeout_s=float(_value(env, "OPENHDO_SERVER_OPEN_TIMEOUT", raw, "server_open_timeout_s", default=10.0)),
             server_api_token=server_api_token,
         )
+
+
+def _tuya_number(
+    env: Mapping[str, str], raw: Mapping[str, Any], env_name: str, key: str,
+    *, required: bool = False, default: int | None = None,
+) -> int | None:
+    value = _value(env, env_name, raw, key, required=required, default=default)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise RuntimeConfigError(f"{key} must be an integer") from error
+
+
+def _tuya_mapping(env: Mapping[str, str], raw: Mapping[str, Any]) -> TuyaDpMapping:
+    return TuyaDpMapping(
+        power=_tuya_number(env, raw, "OPENHDO_TUYA_DP_POWER", "dp_power", required=True),
+        brightness=_tuya_number(env, raw, "OPENHDO_TUYA_DP_BRIGHTNESS", "dp_brightness", required=True),
+        color=_tuya_number(env, raw, "OPENHDO_TUYA_DP_COLOR", "dp_color", required=True),
+        color_format=_string(env, "OPENHDO_TUYA_COLOR_FORMAT", raw, "color_format", required=True),
+        brightness_min=_tuya_number(env, raw, "OPENHDO_TUYA_BRIGHTNESS_MIN", "brightness_min", required=True),
+        brightness_max=_tuya_number(env, raw, "OPENHDO_TUYA_BRIGHTNESS_MAX", "brightness_max", required=True),
+        white=_tuya_number(env, raw, "OPENHDO_TUYA_DP_WHITE", "dp_white"),
+        white_min=_tuya_number(env, raw, "OPENHDO_TUYA_WHITE_MIN", "white_min"),
+        white_max=_tuya_number(env, raw, "OPENHDO_TUYA_WHITE_MAX", "white_max"),
+    )
+
+
+def _pairing_config(env: Mapping[str, str], raw: Mapping[str, Any]) -> TuyaPairingConfig | None:
+    required_keys = (
+        "OPENHDO_TUYA_LOCAL_KEY", "OPENHDO_TUYA_PROTOCOL", "OPENHDO_TUYA_DP_POWER",
+        "OPENHDO_TUYA_DP_BRIGHTNESS", "OPENHDO_TUYA_DP_COLOR", "OPENHDO_TUYA_COLOR_FORMAT",
+        "OPENHDO_TUYA_BRIGHTNESS_MIN", "OPENHDO_TUYA_BRIGHTNESS_MAX",
+    )
+    if not any(
+        _value(env, key, raw, key.removeprefix("OPENHDO_TUYA_").lower()) is not None
+        for key in required_keys
+    ):
+        return None
+    return TuyaPairingConfig(
+        local_key=_string(env, "OPENHDO_TUYA_LOCAL_KEY", raw, "local_key", required=True),
+        protocol_version=_string(env, "OPENHDO_TUYA_PROTOCOL", raw, "protocol", required=True),
+        dps=_tuya_mapping(env, raw),
+        public_name=_string(env, "OPENHDO_TUYA_PUBLIC_NAME", raw, "public_name", default="LED lamp"),
+        port=_tuya_number(env, raw, "OPENHDO_TUYA_PORT", "port", default=6668),
+        timeout_s=float(_value(env, "OPENHDO_TUYA_TIMEOUT", raw, "timeout", default=3.0)),
+        retries=_tuya_number(env, raw, "OPENHDO_TUYA_RETRIES", "retries", default=1),
+    )
 
 
 def _load_json(path_value: str | os.PathLike[str]) -> Mapping[str, Any]:

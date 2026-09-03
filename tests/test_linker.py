@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
@@ -15,6 +15,7 @@ from openhdo_linker import (  # noqa: E402
     Credentials,
     DeviceDescriptor,
     DiscoveryCandidate,
+    DiscoveryConfig,
     Envelope,
     LightState,
     LinkerBoundary,
@@ -27,6 +28,7 @@ from openhdo_linker import (  # noqa: E402
     TuyaDpMapping,
     TuyaDiscoveryOptions,
     TuyaLocalDriver,
+    TuyaPairingConfig,
 )
 from openhdo_linker.cli import _inspection_payload, _parser, _resolve_inspect_local_key  # noqa: E402
 from openhdo_linker.boundary import (  # noqa: E402
@@ -93,6 +95,20 @@ class ReturnAfterEffectiveTimeoutDriver(DiscoveryDriver):
         self.config = config
         await asyncio.sleep(config.timeout_s)
         return ()
+
+
+class PairingDriver(DiscoveryDriver):
+    def __init__(self, result=None, error: Exception | None = None) -> None:
+        super().__init__(error=error)
+        self.result = result or (DeviceDescriptor("candidate.light", "LED lamp"), "tuya-device-1")
+
+    async def pair(self, candidate_id: str):
+        if self.error is not None:
+            raise self.error
+        descriptor, device_id = self.result
+        if descriptor.id != candidate_id:
+            raise ValueError("unexpected candidate")
+        return descriptor, device_id
 
 
 class WebSocketSink:
@@ -195,6 +211,24 @@ class ConfigTests(unittest.TestCase):
         boundary = LinkerBoundary(config.linker, Credentials(), TuyaLocalDriver(discovery=TuyaDiscoveryOptions(enabled=True)))
         self.assertNotIn("devices", boundary.register().payload)
         self.assertFalse(boundary.control_enabled)
+
+    def test_discovery_only_mode_can_load_local_pairing_profile_without_device_id(self) -> None:
+        config = RuntimeConfig.from_env(environ={
+            "OPENHDO_SERVER": "ws://127.0.0.1:8000",
+            "OPENHDO_DISCOVERY_ONLY": "true",
+            "OPENHDO_TUYA_LOCAL_KEY": "0123456789abcdef",
+            "OPENHDO_TUYA_PROTOCOL": "3.3",
+            "OPENHDO_TUYA_DP_POWER": "1",
+            "OPENHDO_TUYA_DP_BRIGHTNESS": "2",
+            "OPENHDO_TUYA_DP_COLOR": "5",
+            "OPENHDO_TUYA_COLOR_FORMAT": "rgb_hex",
+            "OPENHDO_TUYA_BRIGHTNESS_MIN": "10",
+            "OPENHDO_TUYA_BRIGHTNESS_MAX": "1000",
+        })
+        self.assertIsNone(config.device)
+        self.assertIsNone(config.light_id)
+        self.assertIsNotNone(config.pairing)
+        self.assertNotIn("0123456789abcdef", repr(config))
 
     def test_server_token_is_optional_locally_but_required_for_non_local_wss(self) -> None:
         local = RuntimeConfig.from_env(environ=env(OPENHDO_SERVER_TOKEN="server-secret"))
@@ -413,6 +447,81 @@ class DiscoveryEnvelopeTests(unittest.TestCase):
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
+
+        asyncio.run(check())
+
+    def _pairing_request(self, *, timeout_s: object = 7, correlation: UUID | None = None) -> Envelope:
+        message_id = UUID(int=200)
+        return Envelope(
+            type="pairing.start",
+            source="openhdo-server",
+            id=message_id,
+            correlation_id=message_id if correlation is None else correlation,
+            payload={
+                "session_id": str(UUID(int=201)),
+                "discovery_session_id": str(UUID(int=202)),
+                "candidate_id": "candidate.light",
+                "timeout_s": timeout_s,
+            },
+        )
+
+    def test_pairing_emits_only_linker_confirmed_abstract_device(self) -> None:
+        async def check() -> None:
+            driver = PairingDriver()
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
+            messages = await boundary.handle_pairing(self._pairing_request())
+            self.assertEqual(len(messages), 1)
+            message = messages[0]
+            self.assertEqual(message.type, "pairing.completed")
+            self.assertEqual(message.payload["status"], "completed")
+            self.assertEqual(message.payload["candidate_id"], "candidate.light")
+            self.assertEqual(message.payload["device"]["id"], "candidate.light")
+            self.assertNotIn("tuya-device-1", json.dumps(message.to_dict()))
+            self.assertTrue(boundary.control_enabled)
+            self.assertEqual(boundary.device_id, "tuya-device-1")
+
+        asyncio.run(check())
+
+    def test_pairing_failure_does_not_enable_control_or_expose_driver_details(self) -> None:
+        async def check() -> None:
+            driver = PairingDriver(error=RuntimeError("local_key=0123456789abcdef at 192.168.1.20"))
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), driver)
+            message = (await boundary.handle_pairing(self._pairing_request()))[0]
+            self.assertEqual(message.payload["status"], "failed")
+            self.assertIsNone(message.payload.get("device"))
+            self.assertNotIn("0123456789abcdef", json.dumps(message.to_dict()))
+            self.assertNotIn("192.168.1.20", json.dumps(message.to_dict()))
+            self.assertFalse(boundary.control_enabled)
+
+        asyncio.run(check())
+
+    def test_tuya_pairing_uses_only_the_latest_discovery_candidate(self) -> None:
+        async def check() -> None:
+            mapping = TuyaDpMapping(1, 2, 5, "rgb_hex", 10, 1000)
+            pairing = TuyaPairingConfig("0123456789abcdef", "3.3", mapping)
+            driver = TuyaLocalDriver(pairing=pairing, discovery=TuyaDiscoveryOptions(enabled=True))
+            with patch.object(driver, "_discover_sync", return_value=[{"id": "tuya-device-1", "ip": "192.168.1.20"}]):
+                descriptors = await driver.discover(DiscoveryConfig(timeout_s=1), Credentials())
+            candidate_id = descriptors[0].id
+            with (
+                patch.object(driver, "connect", new=AsyncMock()),
+                patch.object(driver, "poll_state", new=AsyncMock(return_value=LightState("tuya-device-1", True, True, Rgb(1, 2, 3), 255))),
+            ):
+                descriptor, device_id = await driver.pair(candidate_id)
+            self.assertEqual(descriptor.id, candidate_id)
+            self.assertEqual(device_id, "tuya-device-1")
+            with self.assertRaises(TuyaConfigurationError):
+                await driver.pair("light.not-found")
+
+        asyncio.run(check())
+
+    def test_server_client_sends_pairing_completion(self) -> None:
+        async def check() -> None:
+            boundary = LinkerBoundary(LinkerConfig(id="openhdo.linker.rgb"), Credentials(), PairingDriver())
+            client = LinkerServerClient(boundary, "ws://127.0.0.1:8000")
+            websocket = WebSocketSink()
+            await client._receive(websocket, self._pairing_request().to_json())
+            self.assertEqual([Envelope.from_json(value).type for value in websocket.messages], ["pairing.completed"])
 
         asyncio.run(check())
 

@@ -59,18 +59,14 @@ class LinkerServerClient:
         session_stop = asyncio.Event()
         receiver = asyncio.create_task(self._receive_loop(websocket), name="openhdo-command-receiver")
         stopper = asyncio.create_task(process_stop.wait(), name="openhdo-process-stop")
-        publisher = (
-            asyncio.create_task(self._publish_states(websocket, session_stop), name="openhdo-state-publisher")
-            if self.boundary.control_enabled
-            else None
-        )
+        publisher = asyncio.create_task(self._publish_states(websocket, session_stop), name="openhdo-state-publisher")
         try:
             done, _ = await asyncio.wait((receiver, stopper), return_when=asyncio.FIRST_COMPLETED)
             if receiver in done:
                 await receiver
         finally:
             session_stop.set()
-            tasks = (receiver, stopper) if publisher is None else (receiver, stopper, publisher)
+            tasks = (receiver, stopper, publisher)
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -95,6 +91,14 @@ class LinkerServerClient:
                 return
             await self._send_many(websocket, messages)
             return
+        if message.type == "pairing.start":
+            try:
+                messages = await self.boundary.handle_pairing(message)
+            except (KeyError, TypeError, ValueError) as error:
+                self.logger.warning("rejected invalid pairing.start: %s", error)
+                return
+            await self._send_many(websocket, messages)
+            return
         if not message.type.startswith("light.command."):
             self.logger.warning("ignored unsupported server message type: %s", message.type)
             return
@@ -116,6 +120,9 @@ class LinkerServerClient:
         delay = self.reconnect_initial_s
         unsubscribe = None
         while not stop.is_set():
+            if not self.boundary.control_enabled:
+                await _wait_or_stop(stop, 0.25)
+                continue
             try:
                 await self.boundary.driver.connect()
 

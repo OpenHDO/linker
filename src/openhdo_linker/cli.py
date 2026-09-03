@@ -139,7 +139,7 @@ async def _discover(args: argparse.Namespace) -> int:
 async def _run(config: RuntimeConfig) -> None:
     discovery = TuyaDiscoveryOptions(enabled=config.discovery_enabled)
     if config.discovery_only:
-        driver = TuyaLocalDriver(discovery=discovery)
+        driver = TuyaLocalDriver(discovery=discovery, pairing=config.pairing)
         boundary = LinkerBoundary(config.linker, Credentials(), driver)
     else:
         assert config.device is not None and config.light_id is not None

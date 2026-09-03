@@ -16,6 +16,7 @@ from .protocol import Envelope
 DISCOVERY_PROTOCOL_MARGIN_S = 0.25
 DISCOVERY_DRIVER_RETURN_MARGIN_S = 0.10
 DISCOVERY_MIN_SCAN_S = 0.5
+PAIRING_PROTOCOL_MARGIN_S = 0.25
 
 
 class CommandJournal(Protocol):
@@ -116,6 +117,31 @@ class LinkerBoundary:
         )
         return messages + (self._discovery_completed(start, session_id, "completed", None),)
 
+    async def handle_pairing(self, start: Envelope) -> tuple[Envelope, ...]:
+        session_id, candidate_id, timeout_s = _pairing_request(start)
+        pair = getattr(self.driver, "pair", None)
+        try:
+            if not callable(pair):
+                raise ValueError("driver does not support pairing")
+            descriptor, device_id = await asyncio.wait_for(
+                pair(candidate_id), timeout=max(0.5, timeout_s - PAIRING_PROTOCOL_MARGIN_S)
+            )
+            if not isinstance(descriptor, DeviceDescriptor) or not isinstance(device_id, str) or not device_id:
+                raise ValueError("driver returned an invalid pairing result")
+            if descriptor.id != candidate_id:
+                raise ValueError("driver paired a different candidate")
+            self.descriptor = descriptor
+            self.light_id = descriptor.id
+            self.device_id = device_id
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            return (self._pairing_completed(start, session_id, candidate_id, "failed", "pairing timed out"),)
+        except Exception:
+            # Pairing errors may contain device addresses or local credentials.
+            return (self._pairing_completed(start, session_id, candidate_id, "failed", "pairing failed"),)
+        return (self._pairing_completed(start, session_id, candidate_id, "completed", None),)
+
     def _discovery_completed(
         self, start: Envelope, session_id: UUID, status: str, error: str | None
     ) -> Envelope:
@@ -124,6 +150,24 @@ class LinkerBoundary:
             source=self.config.id,
             correlation_id=start.id,
             payload={"session_id": str(session_id), "status": status, "error": error},
+        )
+
+    def _pairing_completed(
+        self, start: Envelope, session_id: UUID, candidate_id: str, status: str, error: str | None
+    ) -> Envelope:
+        payload: dict[str, object] = {
+            "session_id": str(session_id),
+            "candidate_id": candidate_id,
+            "status": status,
+            "error": error,
+        }
+        if status == "completed" and self.descriptor is not None:
+            payload["device"] = self.descriptor.to_payload()
+        return Envelope(
+            type="pairing.completed",
+            source=self.config.id,
+            correlation_id=start.id,
+            payload=payload,
         )
 
     def state(self, state: LightState) -> Envelope:
@@ -136,6 +180,8 @@ class LinkerBoundary:
     async def handle(self, command: Envelope) -> Envelope | tuple[Envelope, ...]:
         if command.type == "discovery.start":
             return await self.handle_discovery(command)
+        if command.type == "pairing.start":
+            return await self.handle_pairing(command)
         if command.type not in self._COMMAND_TYPES:
             raise ValueError(f"unsupported message type: {command.type}")
         if command.correlation_id is None:
@@ -265,3 +311,20 @@ def _discovery_request(start: Envelope) -> tuple[UUID, int]:
     if type(timeout) is not int or not 1 <= timeout <= 60:
         raise ValueError("timeout_s must be an integer from 1 to 60")
     return session_id, timeout
+
+
+def _pairing_request(start: Envelope) -> tuple[UUID, str, int]:
+    if start.type != "pairing.start":
+        raise ValueError("pairing request must use pairing.start")
+    if start.correlation_id != start.id:
+        raise ValueError("pairing.start correlation_id must equal envelope id")
+    unknown = set(start.payload) - {"session_id", "discovery_session_id", "candidate_id", "timeout_s"}
+    if unknown:
+        raise ValueError(f"unknown pairing.start fields: {', '.join(sorted(unknown))}")
+    session_id = _required_uuid(start.payload, "session_id")
+    _required_uuid(start.payload, "discovery_session_id")
+    candidate_id = _required_string(start.payload, "candidate_id")
+    timeout = start.payload.get("timeout_s")
+    if type(timeout) is not int or not 1 <= timeout <= 60:
+        raise ValueError("timeout_s must be an integer from 1 to 60")
+    return session_id, candidate_id, timeout
